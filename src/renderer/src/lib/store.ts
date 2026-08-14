@@ -95,6 +95,7 @@ export const initialState: AppState = {
     checkpoints: true,
     dockBadge: false,
     thinkingLevel: 'medium',
+    showReasoning: true,
     autoCompaction: true,
     autoRetry: true,
     model: null,
@@ -193,6 +194,86 @@ export function normalizeBlocks(msg: Record<string, unknown>): RenderMessage {
   }
   base.content = ''
   return base
+}
+
+function toolCallIdOf(payload: Record<string, unknown>): string {
+  const nested = payload.toolCall
+  if (nested && typeof nested === 'object' && 'id' in nested) {
+    return String((nested as { id?: unknown }).id ?? '')
+  }
+  return String(payload.toolCallId ?? payload.id ?? '')
+}
+
+export function patchToolExecs(
+  prev: Record<string, ToolExecState>,
+  event: 'start' | 'update' | 'end',
+  payload: Record<string, unknown>
+): Record<string, ToolExecState> {
+  const id = toolCallIdOf(payload)
+  if (!id) return prev
+  const cur = prev[id]
+  const alreadyDone = cur?.status === 'done' || cur?.status === 'error'
+  if (event === 'start') {
+    if (alreadyDone) return prev
+    return {
+      ...prev,
+      [id]: {
+        toolCallId: id,
+        toolName: String(payload.toolName ?? cur?.toolName ?? 'tool'),
+        args: (payload.args as Record<string, unknown>) ?? cur?.args ?? {},
+        output: cur?.output ?? '',
+        status: 'running'
+      }
+    }
+  }
+  const partial = payload.partialResult as { content?: unknown } | undefined
+  const result = payload.result as { content?: unknown } | undefined
+  const output = extractText((event === 'end' ? result?.content : partial?.content) ?? payload.content)
+  if (event === 'update') {
+    if (alreadyDone) return output ? { ...prev, [id]: { ...cur, output: output || cur.output } } : prev
+    return {
+      ...prev,
+      [id]: {
+        toolCallId: id,
+        toolName: String(payload.toolName ?? cur?.toolName ?? 'tool'),
+        args: (payload.args as Record<string, unknown>) ?? cur?.args ?? {},
+        output: output || cur?.output || '',
+        status: 'running'
+      }
+    }
+  }
+  return {
+    ...prev,
+    [id]: {
+      toolCallId: id,
+      toolName: String(payload.toolName ?? cur?.toolName ?? 'tool'),
+      args: (payload.args as Record<string, unknown>) ?? cur?.args ?? {},
+      output: output || cur?.output || '',
+      status: payload.isError ? 'error' : 'done',
+      isError: Boolean(payload.isError)
+    }
+  }
+}
+
+export function finishToolExecs(
+  prev: Record<string, ToolExecState>,
+  results?: Record<string, unknown>[]
+): Record<string, ToolExecState> {
+  let next = prev
+  if (results) {
+    for (const result of results) {
+      next = patchToolExecs(next, 'end', result)
+    }
+  }
+  let changed = next !== prev
+  const copy = changed ? { ...next } : { ...prev }
+  for (const [id, exec] of Object.entries(copy)) {
+    if (exec.status === 'running' || exec.status === 'pending') {
+      copy[id] = { ...exec, status: 'done' }
+      changed = true
+    }
+  }
+  return changed ? copy : prev
 }
 
 export function extractText(content: unknown): string {

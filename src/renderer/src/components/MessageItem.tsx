@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import type { Block, FleetEntry, RenderMessage, ToolExecState } from '../lib/store'
 import SubagentMark from './SubagentMark'
+import WorkingMark from './WorkingMark'
 
 const USER_COLLAPSE_THRESHOLD = 280
 
@@ -8,6 +9,7 @@ interface Props {
   message: RenderMessage
   toolExecs: Record<string, ToolExecState>
   onOpenSubagent?: (entry: FleetEntry) => void
+  showReasoning?: boolean
 }
 
 /* ─── Helpers ──────────────────────────────────────────── */
@@ -179,8 +181,8 @@ function ChevronIcon({ open }: { open: boolean }): JSX.Element {
   )
 }
 
-function SpinnerIcon(): JSX.Element {
-  return <span className="tool-inline-spin" />
+function RunningMark(): JSX.Element {
+  return <WorkingMark className="tool-inline-mark" label="Running" />
 }
 
 function isSubagentTool(name: string): boolean {
@@ -250,7 +252,7 @@ function InlineToolItem({ info, isOpen, onToggle }: { info: ToolDisplayInfo; isO
         <div className={`tool-inline ${isError ? 'error' : ''}`}>
           <div className="tool-inline-row" onClick={onToggle}>
             <div className="tool-inline-left">
-              {isRunning ? <SpinnerIcon /> : <PencilIcon />}
+              {isRunning ? <RunningMark /> : <PencilIcon />}
               <span className="tool-inline-verb">{verb}</span>
               <span className="tool-inline-filename">{filename || exec.toolName}</span>
               {stats && <DiffStat added={stats.added} removed={stats.removed} />}
@@ -273,7 +275,7 @@ function InlineToolItem({ info, isOpen, onToggle }: { info: ToolDisplayInfo; isO
         <div className={`tool-inline ${isError ? 'error' : ''}`}>
           <div className="tool-inline-row" onClick={onToggle}>
             <div className="tool-inline-left">
-              {isRunning ? <SpinnerIcon /> : <FileIcon />}
+              {isRunning ? <RunningMark /> : <FileIcon />}
               <span className="tool-inline-verb">Read</span>
               <span className="tool-inline-filename">{filename || exec.toolName}</span>
             </div>
@@ -295,7 +297,7 @@ function InlineToolItem({ info, isOpen, onToggle }: { info: ToolDisplayInfo; isO
         <div className={`tool-inline ${isError ? 'error' : ''}`}>
           <div className="tool-inline-row" onClick={onToggle}>
             <div className="tool-inline-left">
-              {isRunning ? <SpinnerIcon /> : <TerminalIcon />}
+              {isRunning ? <RunningMark /> : <TerminalIcon />}
               <span className="tool-inline-verb">Ran</span>
               <code className="tool-inline-cmd">{truncCmd || exec.toolName}</code>
               {isError && <span className="tool-inline-error-dot">●</span>}
@@ -318,7 +320,7 @@ function InlineToolItem({ info, isOpen, onToggle }: { info: ToolDisplayInfo; isO
         <div className={`tool-inline ${isError ? 'error' : ''}`}>
           <div className="tool-inline-row" onClick={onToggle}>
             <div className="tool-inline-left">
-              {isRunning ? <SpinnerIcon /> : <GlobeIcon />}
+              {isRunning ? <RunningMark /> : <GlobeIcon />}
               <span className="tool-inline-verb">Searched the web for</span>
               <span className="tool-inline-query">{query}</span>
             </div>
@@ -339,7 +341,7 @@ function InlineToolItem({ info, isOpen, onToggle }: { info: ToolDisplayInfo; isO
         <div className={`tool-inline ${isError ? 'error' : ''}`}>
           <div className="tool-inline-row" onClick={onToggle}>
             <div className="tool-inline-left">
-              {isRunning ? <SpinnerIcon /> : <ToolIcon />}
+              {isRunning ? <RunningMark /> : <ToolIcon />}
               <span className="tool-inline-verb">{exec.toolName}</span>
               {filename && <span className="tool-inline-filename">{filename}</span>}
               {isError && <span className="tool-inline-error-dot">●</span>}
@@ -499,7 +501,7 @@ function UserBubble({ text, isLong, timestamp }: { text: string; isLong: boolean
 
 /* ─── Main MessageItem ────────────────────────────────── */
 
-export default function MessageItem({ message, toolExecs, onOpenSubagent }: Props): JSX.Element {
+export default function MessageItem({ message, toolExecs, onOpenSubagent, showReasoning = true }: Props): JSX.Element {
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({})
   const [copied, setCopied] = useState(false)
 
@@ -546,7 +548,7 @@ export default function MessageItem({ message, toolExecs, onOpenSubagent }: Prop
       .filter((b) => b.type === 'toolCall')
       .map((b) => {
         const live = b.id ? toolExecs[b.id] : undefined
-        const exec: ToolExecState = live ?? {
+        const fromBlock: ToolExecState = {
           toolCallId: b.id ?? '',
           toolName: b.name ?? 'tool',
           args: (b.arguments as Record<string, unknown>) ?? {},
@@ -554,6 +556,10 @@ export default function MessageItem({ message, toolExecs, onOpenSubagent }: Prop
           status: b.status ?? 'done',
           isError: b.isError
         }
+        const blockFinished = Boolean(b.result) || b.status === 'error'
+        const exec: ToolExecState = live && !blockFinished
+          ? { ...fromBlock, ...live, output: live.output || fromBlock.output }
+          : { ...fromBlock, output: live?.output || fromBlock.output }
         return { block: b, exec, category: classifyTool(exec.toolName, exec.args) } as ToolDisplayInfo
       })
   }, [blocks, toolExecs])
@@ -565,7 +571,7 @@ export default function MessageItem({ message, toolExecs, onOpenSubagent }: Prop
     for (const b of blocks) {
       if (b.type === 'text' && b.text && b.text.trim()) {
         groups.push({ type: 'text', block: b })
-      } else if (b.type === 'thinking' && b.thinking) {
+      } else if (showReasoning && b.type === 'thinking' && b.thinking) {
         groups.push({ type: 'thinking', block: b })
       } else if (b.type === 'subagent') {
         groups.push({ type: 'subagent', block: b })
@@ -586,7 +592,7 @@ export default function MessageItem({ message, toolExecs, onOpenSubagent }: Prop
       }
     }
     return groups
-  }, [blocks, toolInfos])
+  }, [blocks, toolInfos, showReasoning])
 
   // Don't render empty assistant message containers
   if (renderGroups.length === 0 && !message.streaming) {
@@ -621,12 +627,10 @@ export default function MessageItem({ message, toolExecs, onOpenSubagent }: Prop
 
         if (group.type === 'thinking' && group.block) {
           return (
-            <details key={i} className="thinking-block" open={message.streaming || undefined}>
-              <summary>{message.streaming ? 'Thinking' : 'Thought'}</summary>
-              <div className="thinking-content">
-                <Markdown text={group.block.thinking ?? ''} />
-              </div>
-            </details>
+            <div key={i} className="thinking-trace">
+              <Markdown text={group.block.thinking ?? ''} />
+              {message.streaming && i === renderGroups.length - 1 && <span className="caret">{'\u258D'}</span>}
+            </div>
           )
         }
 

@@ -339,6 +339,7 @@ export interface AppSettings {
   checkpoints: boolean
   dockBadge: boolean
   thinkingLevel: string
+  showReasoning: boolean
   autoCompaction: boolean
   autoRetry: boolean
   model: string | null

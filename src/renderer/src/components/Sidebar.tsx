@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import type { AppState } from '../lib/store'
 import type { ViewId, SessionSummary } from '@shared/types'
 import CloudMark from './CloudMark'
+import WorkingMark from './WorkingMark'
 
 interface Props {
   state: AppState
@@ -253,6 +254,7 @@ export default function Sidebar({ state, activeAgentId, onView, onNewChat, onSel
                     active={isCurrentSession}
                     pinned
                     loading={sessionLoading === session.sessionFile}
+                    working={isCurrentSession && isAgentWorking(tabAgent)}
                     confirmingDelete={confirmDelete === session.sessionFile}
                     deleting={deletingSession === session.sessionFile}
                     onOpen={() => openSession(tab.id, pinnedAgentId, session)}
@@ -323,6 +325,7 @@ export default function Sidebar({ state, activeAgentId, onView, onNewChat, onSel
                             active={isCurrentSession}
                             pinned={false}
                             loading={sessionLoading === s.sessionFile}
+                            working={isCurrentSession && isAgentWorking(tabAgent)}
                             confirmingDelete={confirmDelete === s.sessionFile}
                             deleting={deletingSession === s.sessionFile}
                             onOpen={() => openSession(tab.id, tabAgentId, s)}
@@ -368,6 +371,7 @@ function SessionRow({
   active,
   pinned,
   loading,
+  working,
   confirmingDelete,
   deleting,
   onOpen,
@@ -380,6 +384,7 @@ function SessionRow({
   active: boolean
   pinned: boolean
   loading: boolean
+  working: boolean
   confirmingDelete: boolean
   deleting: boolean
   onOpen: () => void
@@ -392,7 +397,8 @@ function SessionRow({
   return (
     <div className={`sub-chat-item ${active ? 'active' : ''} ${confirmingDelete ? 'confirming-delete' : ''}`} aria-current={active ? 'page' : undefined}>
       <button className="session-item-main" type="button" onClick={onOpen} title={title}>
-        <span className="session-item-title">{title}{loading ? ' · Opening' : ''}</span>
+        {(working || loading) && <WorkingMark label={loading ? 'Opening' : 'Working'} />}
+        <span className="session-item-title">{title}</span>
       </button>
       <div className={`session-row-actions ${confirmingDelete ? 'confirming' : ''}`}>
         {confirmingDelete ? (
@@ -417,6 +423,10 @@ function SessionRow({
       </div>
     </div>
   )
+}
+
+function isAgentWorking(agent?: AppState['agents'][string]): boolean {
+  return Boolean(agent && (agent.status === 'working' || agent.isStreaming))
 }
 
 function sessionDisplayName(session: SessionSummary): string {

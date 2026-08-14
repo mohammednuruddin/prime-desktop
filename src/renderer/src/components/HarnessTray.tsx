@@ -1,9 +1,28 @@
 import { useCallback, useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { ActionQueue, SideQuestionTurn } from '@shared/types'
+import type { ModelOption } from '@shared/models'
+import MessageItem from './MessageItem'
+import Composer from './Composer'
+import type { AccessMode } from './AccessPicker'
+import type { RenderMessage } from '../lib/store'
 
 interface Props {
   agentId: string
   busy: boolean
+  models?: ModelOption[]
+  currentModel?: string
+  onSelectModel?: (model: string) => void
+  commands?: { name: string; description?: string }[]
+  effortLevel?: string
+  onSelectEffort?: (effort: string) => void
+  accessMode?: AccessMode
+  onAccessModeChange?: (mode: AccessMode) => void
+  rlmMaxDepth?: number
+  onDepthChange?: (depth: number) => void
+  onSlash?: (text: string) => void
+  onBash?: (command: string) => void
+  showReasoning?: boolean
   onToast?: (text: string, kind?: 'info' | 'success' | 'warning' | 'error') => void
 }
 
@@ -17,13 +36,29 @@ interface SideRun {
 
 const EMPTY_QUEUE: ActionQueue = { steering: [], followUp: [] }
 
-export default function HarnessTray({ agentId, busy, onToast }: Props): JSX.Element {
+export default function HarnessTray({
+  agentId,
+  busy,
+  models = [],
+  currentModel,
+  onSelectModel,
+  commands = [],
+  effortLevel,
+  onSelectEffort,
+  accessMode,
+  onAccessModeChange,
+  rlmMaxDepth,
+  onDepthChange,
+  onSlash,
+  onBash,
+  showReasoning = true,
+  onToast
+}: Props): JSX.Element {
   const [queue, setQueue] = useState<ActionQueue>(EMPTY_QUEUE)
   const [open, setOpen] = useState(false)
   const [lane, setLane] = useState<'steering' | 'followUp'>('steering')
   const [queuedText, setQueuedText] = useState('')
-  const [sideOpen, setSideOpen] = useState(false)
-  const [sideText, setSideText] = useState('')
+  const [sideHost, setSideHost] = useState<HTMLElement | null>(null)
   const [turns, setTurns] = useState<SideQuestionTurn[]>([])
   const [sideRun, setSideRun] = useState<SideRun | null>(null)
 
@@ -32,6 +67,14 @@ export default function HarnessTray({ agentId, busy, onToast }: Props): JSX.Elem
       .then((result) => setQueue(result as ActionQueue))
       .catch(() => {})
   }, [agentId])
+
+  useEffect(() => {
+    const attach = () => setSideHost(document.getElementById('side-thread-panel-slot'))
+    attach()
+    const observer = new MutationObserver(attach)
+    observer.observe(document.body, { childList: true, subtree: true })
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     setQueue(EMPTY_QUEUE)
@@ -111,29 +154,51 @@ export default function HarnessTray({ agentId, busy, onToast }: Props): JSX.Elem
       .catch((error: Error) => onToast?.(error.message, 'error'))
   }
 
-  const startSide = () => {
-    const question = sideText.trim()
+  const startSide = (questionText: string) => {
+    const question = questionText.trim()
     if (!question || sideRun?.status === 'running') return
     const id = `desktop-side-${Date.now()}`
     setSideRun({ id, question, answer: '', status: 'running' })
-    setSideText('')
     void window.prime.agentHarness(agentId, 'side_question_start', { id, question, previousTurns: turns })
       .catch((error: Error) => setSideRun({ id, question, answer: '', status: 'error', errorMessage: error.message }))
   }
 
+  useEffect(() => {
+    const handleOpen = (event: Event) => {
+      const question = (event as CustomEvent<{ question?: string }>).detail?.question
+      if (question) startSide(question)
+    }
+    window.addEventListener('prime:open-side-chat', handleOpen)
+    return () => window.removeEventListener('prime:open-side-chat', handleOpen)
+  })
+
   const count = queue.steering.length + queue.followUp.length
+  const sideMessages: RenderMessage[] = turns.flatMap((turn, index) => [
+    { id: `side-user-${index}`, role: 'user', content: turn.question },
+    { id: `side-assistant-${index}`, role: 'assistant', content: turn.answer }
+  ])
+  if (sideRun && sideRun.status !== 'complete') {
+    sideMessages.push({ id: `side-user-${sideRun.id}`, role: 'user', content: sideRun.question })
+    if (sideRun.answer) {
+      sideMessages.push({
+        id: `side-assistant-${sideRun.id}`,
+        role: 'assistant',
+        content: sideRun.answer,
+        streaming: sideRun.status === 'running'
+      })
+    }
+  }
   return (
     <>
-      <div className="harness-controls" aria-label="Live session controls">
-        <button className={`harness-control ${open ? 'active' : ''}`} type="button" onClick={() => setOpen((value) => !value)}>
-          Queue{count ? ` ${count}` : ''}
-        </button>
-        <button className={`harness-control ${sideOpen ? 'active' : ''}`} type="button" onClick={() => setSideOpen((value) => !value)}>
-          Side thread{sideRun?.status === 'running' ? ' · running' : turns.length ? ` ${turns.length}` : ''}
-        </button>
-      </div>
+      {count > 0 && (
+        <div className="harness-controls" aria-label="Queued session messages">
+          <button className={`harness-control ${open ? 'active' : ''}`} type="button" onClick={() => setOpen((value) => !value)}>
+            Queued messages · {count}
+          </button>
+        </div>
+      )}
 
-      {open && (
+      {open && count > 0 && (
         <section className="harness-popover queue-popover">
           <header>
             <strong>Admission queue</strong>
@@ -163,39 +228,50 @@ export default function HarnessTray({ agentId, busy, onToast }: Props): JSX.Elem
         </section>
       )}
 
-      {sideOpen && (
-        <aside className="side-thread-drawer">
-          <header>
-            <div>
-              <strong>Side thread</strong>
-              <span>Independent from the main transcript</span>
-            </div>
-            <button type="button" aria-label="Close side thread" onClick={() => setSideOpen(false)}>×</button>
-          </header>
-          <div className="side-thread-turns">
-            {turns.map((turn, index) => (
-              <div className="side-thread-turn" key={`${index}-${turn.question}`}>
-                <b>{turn.question}</b>
-                <p>{turn.answer}</p>
-              </div>
-            ))}
-            {sideRun && (sideRun.status === 'running' || sideRun.status === 'error' || sideRun.status === 'cancelled') && (
-              <div className={`side-thread-turn ${sideRun.status}`}>
-                <b>{sideRun.question}</b>
-                <p>{sideRun.answer || sideRun.errorMessage || (sideRun.status === 'running' ? 'Thinking…' : sideRun.status)}</p>
+      {sideHost && createPortal(
+        <section className="side-thread-chat">
+          <div className="side-thread-intro">Independent from the main transcript</div>
+          <div className="side-thread-turns sp-chat-feed">
+            {sideMessages.map((message) => <MessageItem key={message.id} message={message} toolExecs={{}} showReasoning={showReasoning} />)}
+            {sideRun?.status === 'running' && !sideRun.answer && (
+              <div className="assistant-pending" role="status">
+                <span className="assistant-pending-shimmer">Thinking…</span>
               </div>
             )}
-            {!sideRun && turns.length === 0 && <div className="empty-state">Ask a quick question without changing the main conversation.</div>}
+            {sideRun && (sideRun.status === 'error' || sideRun.status === 'cancelled') && (
+              <div className="sp-chat-error">{sideRun.errorMessage || sideRun.status}</div>
+            )}
+            {!sideRun && turns.length === 0 && <div className="sp-empty">Ask a quick question without changing the main conversation.</div>}
           </div>
-          <footer>
-            <textarea value={sideText} placeholder="Ask a side question" onChange={(event) => setSideText(event.target.value)} />
-            {sideRun?.status === 'running' ? (
-              <button type="button" onClick={() => void window.prime.agentHarness(agentId, 'side_question_abort', { id: sideRun.id })}>Cancel</button>
-            ) : (
-              <button type="button" onClick={startSide}>Ask</button>
-            )}
-          </footer>
-        </aside>
+          <Composer
+            busy={sideRun?.status === 'running'}
+            commands={commands}
+            onSend={(text, images) => {
+              if (images.length > 0) {
+                onToast?.('Side questions do not support image attachments yet.', 'warning')
+              }
+              if (text.trim()) startSide(text)
+            }}
+            onSlash={onSlash ?? startSide}
+            onAbort={() => {
+              if (sideRun?.status === 'running') {
+                void window.prime.agentHarness(agentId, 'side_question_abort', { id: sideRun.id })
+              }
+            }}
+            onBash={onBash ?? ((command) => startSide(`!${command}`))}
+            models={models}
+            currentModel={currentModel}
+            onSelectModel={onSelectModel}
+            effortLevel={effortLevel}
+            onSelectEffort={onSelectEffort}
+            accessMode={accessMode}
+            onAccessModeChange={onAccessModeChange}
+            rlmMaxDepth={rlmMaxDepth}
+            onDepthChange={onDepthChange}
+            showContext={false}
+          />
+        </section>,
+        sideHost
       )}
     </>
   )

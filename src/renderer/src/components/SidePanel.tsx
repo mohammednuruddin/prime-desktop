@@ -4,11 +4,11 @@ import { extractText, mergeMessage, type FleetEntry, type RenderMessage } from '
 import type { SessionTreeNode, SubagentNode } from '@shared/types'
 import { isInternalStateRestoreMessage } from '@shared/messageVisibility'
 import SubagentMark from './SubagentMark'
-import { Markdown } from './MessageItem'
+import MessageItem from './MessageItem'
 import TerminalPanel from './TerminalPanel'
 import GitPanel from './GitPanel'
 
-export type SidePanelTab = 'subagents' | 'timeline' | 'terminal' | 'git'
+export type SidePanelTab = 'subagents' | 'sidechat' | 'timeline' | 'terminal' | 'git'
 
 interface Props {
   open: boolean
@@ -20,6 +20,7 @@ interface Props {
   onTabChange?: (tab: SidePanelTab) => void
   selectedEntry: FleetEntry | null
   onSelectEntry: (entry: FleetEntry | null) => void
+  showReasoning?: boolean
 }
 
 /* ─── Tab icons ──────────────────────────────────────── */
@@ -60,6 +61,14 @@ function TimelineIcon(): JSX.Element {
   )
 }
 
+function SideChatIcon(): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <path d="M5 5.5h14v10H9l-4 3v-13z" />
+    </svg>
+  )
+}
+
 function ChevronLeft(): JSX.Element {
   return (
     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2">
@@ -89,7 +98,7 @@ function childBody(entry: FleetEntry): string {
   return entry.childText ?? (entry.status === 'done' ? entryBody(entry) : '')
 }
 
-function SubagentsTab({ fleet, tree, selected, agentId, onSelect }: { fleet: FleetEntry[]; tree: SubagentNode[]; selected: FleetEntry | null; agentId: string | null; onSelect: (entry: FleetEntry | null) => void }): JSX.Element {
+function SubagentsTab({ fleet, tree, selected, agentId, onSelect, showReasoning = true }: { fleet: FleetEntry[]; tree: SubagentNode[]; selected: FleetEntry | null; agentId: string | null; onSelect: (entry: FleetEntry | null) => void; showReasoning?: boolean }): JSX.Element {
   if (selected) {
     const selectedNode = findNodePath(tree, selected)?.at(-1) ?? null
     const currentEntry = selectedNode ? {
@@ -113,6 +122,7 @@ function SubagentsTab({ fleet, tree, selected, agentId, onSelect }: { fleet: Fle
         children={selectedNode?.children ?? []}
         fleet={fleet}
         onSelect={onSelect}
+        showReasoning={showReasoning}
       />
     )
   }
@@ -269,7 +279,8 @@ function SubagentChat({
   node,
   children,
   fleet,
-  onSelect
+  onSelect,
+  showReasoning = true
 }: {
   agentId: string | null
   entry: FleetEntry
@@ -277,6 +288,7 @@ function SubagentChat({
   children: SubagentNode[]
   fleet: FleetEntry[]
   onSelect: (entry: FleetEntry) => void
+  showReasoning?: boolean
 }): JSX.Element {
   const target = node?.activeSessionId ?? node?.sessionId
     ?? (typeof entry.payload?.activeSessionId === 'string' ? entry.payload.activeSessionId : '')
@@ -394,6 +406,35 @@ function SubagentChat({
     }
   }
 
+  const hasUserMessage = messages.some((message) => message.role === 'user')
+  const conversationMessages: RenderMessage[] = messages.length > 0
+    ? [
+        ...(!hasUserMessage && taskText ? [{
+          id: `task-${entry.id}`,
+          role: 'user' as const,
+          content: taskText,
+          timestamp: entry.at
+        }] : []),
+        ...messages.filter((message) => {
+          const text = extractText(message.content).trim()
+          return text && !(!hasUserMessage && message.role === 'assistant' && text === taskText)
+        })
+      ]
+    : [
+        ...(parentBody(entry) ? [{
+          id: `parent-${entry.id}`,
+          role: 'user' as const,
+          content: parentBody(entry),
+          timestamp: entry.at
+        }] : []),
+        ...(childBody(entry) ? [{
+          id: `child-${entry.id}`,
+          role: 'assistant' as const,
+          content: childBody(entry).trim(),
+          timestamp: entry.at
+        }] : [])
+      ]
+
   return (
     <div className="sp-agent-detail">
       {node && (
@@ -421,31 +462,16 @@ function SubagentChat({
       )}
       <div className="sp-detail-body" ref={detailBodyRef}>
         <div className="sp-chat-feed">
-          {messages.length > 0 ? (
-            <>
-              {!messages.some((message) => message.role === 'user') && taskText && (
-                <div className="sp-conversation-turn user"><div className="sp-conversation-bubble">{taskText}</div></div>
-              )}
-              {messages.map((message, index) => {
-                const text = extractText(message.content).trim()
-                if (!text) return null
-                if (!messages.some((item) => item.role === 'user') && message.role === 'assistant' && text === taskText) return null
-                return (
-                  <div key={message.id ?? index} className={`sp-conversation-turn ${message.role}`}>
-                    <div className="sp-conversation-bubble">
-                      {message.role === 'assistant' ? <Markdown text={text} /> : text}
-                    </div>
-                  </div>
-                )
-              })}
-            </>
-          ) : (
-            <>
-              {parentBody(entry) && <div className="sp-conversation-turn user"><div className="sp-conversation-bubble">{parentBody(entry)}</div></div>}
-              {childBody(entry) && <div className="sp-conversation-turn assistant"><div className="sp-conversation-bubble"><Markdown text={childBody(entry).trim()} /></div></div>}
-              {!childBody(entry) && entry.status === 'running' && <div className="sp-chat-state"><span className="sp-stream-dot" /> Working</div>}
-            </>
-          )}
+          {conversationMessages.map((message) => (
+            <MessageItem
+              key={message.id}
+              message={message}
+              toolExecs={{}}
+              onOpenSubagent={onSelect}
+              showReasoning={showReasoning}
+            />
+          ))}
+          {conversationMessages.length === 0 && entry.status === 'running' && <div className="sp-chat-state"><span className="sp-stream-dot" /> Working</div>}
           {awaitingReply && (
             <div className="assistant-pending sp-assistant-pending" role="status">
               <span className="assistant-pending-shimmer">Thinking…</span>
@@ -488,9 +514,11 @@ function SubagentChat({
           disabled={!target || sending}
           rows={1}
         />
-        <button type="button" disabled={!target || !draft.trim() || sending} onClick={() => void send()} aria-label="Send follow-up">
-          <svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6" /></svg>
-        </button>
+        <div className="sp-chat-toolbar">
+          <button className="sp-chat-send" type="button" disabled={!target || !draft.trim() || sending} onClick={() => void send()} aria-label="Send follow-up">
+            <svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6" /></svg>
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -499,12 +527,13 @@ function SubagentChat({
 /* ─── Main SidePanel ─────────────────────────────────── */
 const TABS: { id: SidePanelTab; label: string; Icon: () => JSX.Element }[] = [
   { id: 'subagents', label: 'Subagents', Icon: SubagentIcon },
+  { id: 'sidechat', label: 'Side chat', Icon: SideChatIcon },
   { id: 'timeline', label: 'Timeline', Icon: TimelineIcon },
   { id: 'terminal', label: 'Terminal', Icon: TerminalIcon2 },
   { id: 'git', label: 'Git', Icon: GitIcon },
 ]
 
-export default function SidePanel({ open, onToggle, fleet, tree, agentId, activeTab = 'subagents', onTabChange, selectedEntry, onSelectEntry }: Props): JSX.Element {
+export default function SidePanel({ open, onToggle, fleet, tree, agentId, activeTab = 'subagents', onTabChange, selectedEntry, onSelectEntry, showReasoning = true }: Props): JSX.Element {
   const [tab, setTab] = useState<SidePanelTab>(activeTab)
   const [width, setWidth] = useState(() => Math.max(360, Math.min(520, window.innerWidth - 232 - 360)))
   const dragging = useRef(false)
@@ -606,7 +635,8 @@ export default function SidePanel({ open, onToggle, fleet, tree, agentId, active
 
           {/* Content */}
           <div className="sp-content">
-            {tab === 'subagents' && <SubagentsTab fleet={fleet} tree={tree} selected={selectedEntry} agentId={agentId} onSelect={onSelectEntry} />}
+            {tab === 'subagents' && <SubagentsTab fleet={fleet} tree={tree} selected={selectedEntry} agentId={agentId} onSelect={onSelectEntry} showReasoning={showReasoning} />}
+            <div id="side-thread-panel-slot" className={`side-thread-slot ${tab === 'sidechat' ? 'active' : ''}`} />
             {tab === 'timeline' && <TimelineTab agentId={agentId} />}
             {tab === 'terminal' && <TerminalPanel agentId={agentId} />}
             {tab === 'git' && <GitPanel agentId={agentId} />}

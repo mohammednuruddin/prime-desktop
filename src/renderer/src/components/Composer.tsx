@@ -46,6 +46,7 @@ interface Props {
   onSelectProject?: (projectId: string) => void
   onNewProject?: () => void
   onBranchClick?: () => void
+  showContext?: boolean
   externalText?: string
   banner?: ReactNode
 }
@@ -96,6 +97,7 @@ export default function Composer({
   onSelectProject,
   onNewProject,
   onBranchClick,
+  showContext = true,
   externalText,
   banner
 }: Props): JSX.Element {
@@ -264,7 +266,7 @@ export default function Composer({
 
   return (
     <div className="composer-wrap">
-      {projectName && (
+      {projectName && showContext && (
         <div className="composer-context">
           <div className="composer-project-control" ref={projectPickerRef}>
             <button
@@ -673,22 +675,38 @@ function displayCommandName(name: string): string {
 function CommandGlyph({ name }: { name: string }): JSX.Element {
   const n = name.toLowerCase()
   let inner: JSX.Element
-  if (n === 'compact') inner = <path d="M4 7h16M8 12h8M10 17h4" />
-  else if (n === 'new' || n === 'clear') inner = <path d="M12 5v14M5 12h14" />
-  else if (n === 'model') inner = <><circle cx="12" cy="12" r="3" /><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4L7 17M17 7l1.4-1.4" /></>
+  if (n === 'compact') inner = <><path d="M4 8h4V4M20 8h-4V4M4 16h4v4M20 16h-4v4" /><circle cx="12" cy="12" r="2" /></>
+  else if (n === 'new' || n === 'clear' || n === 'continue') inner = <><circle cx="12" cy="12" r="9" /><path d="M12 8v8M8 12h8" /></>
+  else if (n === 'model') inner = <path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3zM4.4 7.7L12 12l7.6-4.3M12 12v9" />
   else if (n === 'effort' || n === 'thinking') inner = <path d="M12 3a6 6 0 00-4 10c.6.6 1 1.4 1 2.2V17h6v-1.8c0-.8.4-1.6 1-2.2A6 6 0 0012 3zM10 21h4" />
   else if (n === 'goal') inner = <><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /></>
+  else if (n === 'fast') inner = <path d="M13 2L5 14h6l-1 8 9-13h-6V2z" />
+  else if (n === 'feedback' || n === 'btw' || n === 'side') inner = <path d="M4 5h16v11H9l-5 4V5z" />
+  else if (n === 'code-review' || n === 'review') inner = <><path d="M9 9V6a3 3 0 016 0v3M7 13h10M8 9h8v9a4 4 0 01-8 0V9z" /><path d="M4 11h4M16 11h4M5 18h3M16 18h3" /></>
+  else if (n === 'init' || n === 'session' || n === 'system-prompt') inner = <><path d="M6 3h9l3 3v15H6z" /><path d="M15 3v4h4M9 12h6M9 16h6" /></>
   else if (n === 'login' || n === 'logout') inner = <path d="M10 17l5-5-5-5M15 12H3M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4" />
   else if (n === 'fork' || n === 'tree' || n === 'clone') inner = <path d="M6 3v12M6 15a3 3 0 100 6 3 3 0 000-6zM18 3a3 3 0 100 6 3 3 0 000-6zM18 21a3 3 0 100-6 3 3 0 000 6zM6 9h6a6 6 0 016 6" />
   else if (n === 'settings') inner = <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 00.34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0015 19.4a1.7 1.7 0 00-1 .6V21h-4v-1a1.7 1.7 0 00-1-.6 1.7 1.7 0 00-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-.6-1H3v-4h1a1.7 1.7 0 00.6-1 1.7 1.7 0 00-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-.6V3h4v1a1.7 1.7 0 001 .6 1.7 1.7 0 001.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 00.6 1H21v4h-1a1.7 1.7 0 00-.6 1z" /></>
   else if (n === 'share' || n === 'export') inner = <path d="M4 12v7a1 1 0 001 1h14a1 1 0 001-1v-7M16 6l-4-4-4 4M12 2v14" />
-  else if (n === 'mcp') inner = <path d="M8 10V7a4 4 0 018 0v3M6 10h12v10H6z" />
+  else if (n === 'import') inner = <path d="M4 12v7a1 1 0 001 1h14a1 1 0 001-1v-7M8 9l4 4 4-4M12 13V2" />
+  else if (n === 'mcp') inner = <path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3zM4.4 7.7L12 12l7.6-4.3M12 12v9" />
   else if (n === 'heartbeat' || n === 'heartbeats') inner = <path d="M3 12h4l2-5 4 10 2-5h6" />
   else if (n === 'rlm-max-depth') inner = <><circle cx="12" cy="12" r="3" /><circle cx="12" cy="12" r="7" /></>
   else if (n === 'resume') inner = <path d="M8 5v14l11-7z" />
   else if (n === 'copy') inner = <><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a2 2 0 012-2h10" /></>
+  else if (n === 'name' || n === 'rename') inner = <><path d="M4 20l4.5-1 10-10-3.5-3.5-10 10L4 20zM13.5 7l3.5 3.5" /></>
+  else if (n === 'logs') inner = <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M7 9l3 3-3 3M12 15h5" /></>
+  else if (n === 'traces' || n === 'context' || n === 'usage') inner = <><path d="M4 17a8 8 0 1116 0" /><path d="M12 13l4-4M7 17h10" /></>
+  else if (n === 'changelog') inner = <><path d="M5 5h14M5 12h14M5 19h14" /><circle cx="8" cy="5" r="1" /><circle cx="15" cy="12" r="1" /><circle cx="10" cy="19" r="1" /></>
+  else if (n === 'hotkeys') inner = <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M7 9h1M11 9h1M15 9h2M7 13h2M12 13h1M16 13h1M7 16h10" /></>
+  else if (n === 'update' || n === 'reload') inner = <><path d="M20 7v5h-5M4 17v-5h5" /><path d="M18.5 10A7 7 0 006 7.5L4 12M5.5 14A7 7 0 0018 16.5l2-4.5" /></>
+  else if (n === 'refine') inner = <><path d="M12 3l1.2 3.8L17 8l-3.8 1.2L12 13l-1.2-3.8L7 8l3.8-1.2L12 3zM18 14l.8 2.2L21 17l-2.2.8L18 20l-.8-2.2L15 17l2.2-.8L18 14z" /></>
+  else if (n === 'autonomous') inner = <path d="M7 7h7a5 5 0 010 10H7M7 7l3-3M7 7l3 3M17 17l-3-3M17 17l-3 3" />
+  else if (n === 'scoped-models') inner = <path d="M12 3l8 4-8 4-8-4 8-4zM4 12l8 4 8-4M4 17l8 4 8-4" />
+  else if (n === 'fullscreen') inner = <path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5" />
+  else if (n === 'pet') inner = <><circle cx="12" cy="12" r="4" /><circle cx="6" cy="8" r="2" /><circle cx="18" cy="8" r="2" /><circle cx="8" cy="18" r="2" /><circle cx="16" cy="18" r="2" /></>
   else if (n === 'quit') inner = <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9" />
-  else inner = <circle cx="12" cy="12" r="3.5" />
+  else inner = <><rect x="5" y="4" width="14" height="16" rx="2" /><path d="M9 9h6M9 13h6M9 17h4" /></>
   return (
     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
       {inner}

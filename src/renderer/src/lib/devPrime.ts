@@ -6,6 +6,7 @@ const devSettings = {
   checkpoints: true,
   dockBadge: false,
   thinkingLevel: 'high',
+  showReasoning: true,
   autoCompaction: true,
   autoRetry: true,
   model: null,

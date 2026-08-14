@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { initialState, mergeMessage, extractText, type AppState, type ToolExecState, type FleetEntry, type RenderMessage } from './lib/store'
+import { initialState, mergeMessage, finishToolExecs, patchToolExecs, type AppState, type FleetEntry, type RenderMessage } from './lib/store'
 import TabBar from './components/TabBar'
 import Sidebar from './components/Sidebar'
 import SidePanel, { type SidePanelTab } from './components/SidePanel'
@@ -28,6 +28,15 @@ export default function App(): JSX.Element {
   const [selectedFleetEntry, setSelectedFleetEntry] = useState<FleetEntry | null>(null)
   const [subagentTree, setSubagentTree] = useState<SubagentNode[]>([])
   const [accessMode, setAccessMode] = useState<AccessMode>('ask')
+
+  useEffect(() => {
+    const openSideChat = () => {
+      setSidePanelTab('sidechat')
+      setSidePanelOpen(true)
+    }
+    window.addEventListener('prime:open-side-chat', openSideChat)
+    return () => window.removeEventListener('prime:open-side-chat', openSideChat)
+  }, [])
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
@@ -181,55 +190,26 @@ export default function App(): JSX.Element {
               }
             }
           }
-          return { ...s, messages: { ...s.messages, [agentId]: messages } }
+          return {
+            ...s,
+            messages: { ...s.messages, [agentId]: messages },
+            toolExecs: { ...s.toolExecs, [agentId]: finishToolExecs(s.toolExecs[agentId] ?? {}, results) }
+          }
         })
         void refreshStats(agentId)
         return
       }
-      case 'tool_execution_start': {
-        const t: ToolExecState = {
-          toolCallId: payload.toolCallId as string,
-          toolName: payload.toolName as string,
-          args: (payload.args as Record<string, unknown>) ?? {},
-          output: '',
-          status: 'running'
-        }
+      case 'tool_execution_start':
+      case 'tool_execution_update':
+      case 'tool_execution_end': {
+        const kind = type === 'tool_execution_start' ? 'start' : type === 'tool_execution_update' ? 'update' : 'end'
         mutate((s) => ({
           ...s,
-          toolExecs: { ...s.toolExecs, [agentId]: { ...(s.toolExecs[agentId] ?? {}), [t.toolCallId]: t } }
+          toolExecs: {
+            ...s.toolExecs,
+            [agentId]: patchToolExecs(s.toolExecs[agentId] ?? {}, kind, payload)
+          }
         }))
-        return
-      }
-      case 'tool_execution_update': {
-        mutate((s) => {
-          const cur = s.toolExecs[agentId] ?? {}
-          const prev = cur[payload.toolCallId as string]
-          if (!prev) return s
-          const pr = payload.partialResult as Record<string, unknown> | undefined
-          return {
-            ...s,
-            toolExecs: {
-              ...s.toolExecs,
-              [agentId]: { ...cur, [payload.toolCallId as string]: { ...prev, output: extractText(pr?.content) || prev.output, status: 'running' } }
-            }
-          }
-        })
-        return
-      }
-      case 'tool_execution_end': {
-        mutate((s) => {
-          const cur = s.toolExecs[agentId] ?? {}
-          const prev = cur[payload.toolCallId as string]
-          if (!prev) return s
-          const res = payload.result as Record<string, unknown> | undefined
-          return {
-            ...s,
-            toolExecs: {
-              ...s.toolExecs,
-              [agentId]: { ...cur, [payload.toolCallId as string]: { ...prev, output: extractText(res?.content), status: payload.isError ? 'error' : 'done', isError: Boolean(payload.isError) } }
-            }
-          }
-        })
         return
       }
       case 'extension_ui_request': {
@@ -446,6 +426,7 @@ export default function App(): JSX.Element {
                       void window.prime.tabSelect(projectId)
                     }}
                     onNewProject={() => void openFolder()}
+                    showReasoning={state.settings.showReasoning !== false}
                     onToast={(text, kind = 'info') => {
                       const t = { id: `t-${Date.now()}`, kind, text }
                       mutate((s) => ({ ...s, toasts: [...s.toasts.slice(-4), t] }))
@@ -534,6 +515,7 @@ export default function App(): JSX.Element {
                 onTabChange={setSidePanelTab}
                 selectedEntry={selectedFleetEntry}
                 onSelectEntry={setSelectedFleetEntry}
+                showReasoning={state.settings.showReasoning !== false}
               />
             </>
           )}

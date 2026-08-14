@@ -9,8 +9,8 @@ import MessageItem from '../components/MessageItem'
 import SubagentMark from '../components/SubagentMark'
 import SlashOverlay from '../components/SlashOverlay'
 import HarnessTray from '../components/HarnessTray'
-import type { Block, FleetEntry, RenderMessage } from '../lib/store'
-import { mergeMessage as merge, extractText } from '../lib/store'
+import type { Block, FleetEntry, RenderMessage, ToolExecState } from '../lib/store'
+import { mergeMessage as merge, finishToolExecs, patchToolExecs } from '../lib/store'
 import type { AccessMode } from '../components/AccessPicker'
 import { isInternalStateRestoreMessage } from '@shared/messageVisibility'
 
@@ -38,12 +38,13 @@ interface Props {
   showSubagentCard?: boolean
   onToast?: (text: string, kind?: 'info' | 'success' | 'warning' | 'error') => void
   rlmMaxDepth?: number
+  showReasoning?: boolean
   onDepthChange?: (depth: number) => void
 }
 
-export default function ChatView({ agentId, info, tab: _tab, projects = [], accessMode = 'ask', onAccessModeChange, onOpenSubagent, onSubagentActivity, onNavigate, onOpenGit, onSelectProject, onNewProject, subagents = [], onOpenSubagents, showSubagentCard = true, onToast, rlmMaxDepth = 1, onDepthChange }: Props): JSX.Element {
+export default function ChatView({ agentId, info, tab: _tab, projects = [], accessMode = 'ask', onAccessModeChange, onOpenSubagent, onSubagentActivity, onNavigate, onOpenGit, onSelectProject, onNewProject, subagents = [], onOpenSubagents, showSubagentCard = true, onToast, rlmMaxDepth = 1, showReasoning = true, onDepthChange }: Props): JSX.Element {
   const [messages, setMessages] = useState<RenderMessage[]>([])
-  const [toolExecs, setToolExecs] = useState<Record<string, unknown>>({})
+  const [toolExecs, setToolExecs] = useState<Record<string, ToolExecState>>({})
   const [commands, setCommands] = useState<{ name: string; description?: string }[]>([])
   const [models, setModels] = useState<ModelOption[]>([])
   const [branch, setBranch] = useState<string | null>(null)
@@ -141,6 +142,9 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
           } else if (msg) {
             setMessages((prev) => merge(prev, msg))
           }
+          if (e.type === 'message_end' && msg?.role === 'toolResult') {
+            setToolExecs((prev) => patchToolExecs(prev, 'end', msg))
+          }
           break
         }
         case 'custom_message': {
@@ -196,40 +200,25 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
             }
             return next.map((m) => ({ ...m, streaming: false }))
           })
+          setToolExecs((prev) => finishToolExecs(prev, results))
+          break
+        }
+        case 'agent_end': {
+          setAwaitingResponse(false)
+          setToolExecs((prev) => finishToolExecs(prev))
+          setMessages((prev) => prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)))
           break
         }
         case 'tool_execution_start': {
-          const id = p.toolCallId as string
-          setToolExecs((prev) => ({
-            ...prev,
-            [id]: {
-              toolCallId: id,
-              toolName: p.toolName,
-              args: p.args ?? {},
-              output: '',
-              status: 'running'
-            }
-          }))
+          setToolExecs((prev) => patchToolExecs(prev, 'start', p))
           break
         }
         case 'tool_execution_update': {
-          const id = p.toolCallId as string
-          const pr = p.partialResult as { content?: unknown } | undefined
-          setToolExecs((prev) => {
-            const cur = prev[id] as Record<string, unknown> | undefined
-            if (!cur) return prev
-            return { ...prev, [id]: { ...cur, output: extractText(pr?.content) } }
-          })
+          setToolExecs((prev) => patchToolExecs(prev, 'update', p))
           break
         }
         case 'tool_execution_end': {
-          const id = p.toolCallId as string
-          const res = p.result as { content?: unknown } | undefined
-          setToolExecs((prev) => {
-            const cur = prev[id] as Record<string, unknown> | undefined
-            if (!cur) return prev
-            return { ...prev, [id]: { ...cur, output: extractText(res?.content), status: p.isError ? 'error' : 'done', isError: Boolean(p.isError) } }
-          })
+          setToolExecs((prev) => patchToolExecs(prev, 'end', p))
           break
         }
       }
@@ -274,6 +263,16 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
   }, [messages])
 
   const busy = info?.isStreaming === true || info?.status === 'working'
+
+  useEffect(() => {
+    if (busy) return
+    setAwaitingResponse(false)
+    setToolExecs((prev) => finishToolExecs(prev))
+    setMessages((prev) => {
+      if (!prev.some((m) => m.streaming)) return prev
+      return prev.map((m) => (m.streaming ? { ...m, streaming: false } : m))
+    })
+  }, [busy])
 
   const handleSend = useCallback(
     (text: string, images: { type: 'image'; data: string; mimeType: string }[]) => {
@@ -472,9 +471,7 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
           return
         }
         case 'btw': {
-          note(`Side question: ${action.question}`)
-          const result = await window.prime.agentHarness(agentId, 'side_question', { question: action.question }) as { answer?: string }
-          note(result.answer || 'Side question completed.')
+          window.dispatchEvent(new CustomEvent('prime:open-side-chat', { detail: { question: action.question } }))
           return
         }
         case 'fast': {
@@ -568,7 +565,7 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
         ) : (
           <div className="codex-feed-wrapper">
             {messages.map((m, i) => (
-              <MessageItem key={m.id ?? i} message={m} toolExecs={toolExecs as never} onOpenSubagent={onOpenSubagent} />
+              <MessageItem key={m.id ?? i} message={m} toolExecs={toolExecs} onOpenSubagent={onOpenSubagent} showReasoning={showReasoning} />
             ))}
             {awaitingResponse && (
               <div className="assistant-pending" role="status" aria-live="polite">
@@ -599,7 +596,24 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
 
       {/* Floating Bottom Composer */}
       <ExtensionSurface info={info} placement="aboveEditor" />
-      <HarnessTray agentId={agentId} busy={busy} onToast={onToast} />
+      <HarnessTray
+        agentId={agentId}
+        busy={busy}
+        models={models}
+        currentModel={info?.model ?? undefined}
+        onSelectModel={pickModel}
+        commands={commands}
+        effortLevel={effortLevel}
+        onSelectEffort={handleSelectEffort}
+        accessMode={accessMode}
+        onAccessModeChange={onAccessModeChange}
+        rlmMaxDepth={rlmMaxDepth}
+        onDepthChange={onDepthChange}
+        showReasoning={showReasoning}
+        onSlash={(text) => void handleSlash(text)}
+        onBash={handleBash}
+        onToast={onToast}
+      />
       <Composer
         busy={busy}
         commands={commands}
@@ -625,6 +639,7 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
         onSelectProject={onSelectProject}
         onNewProject={onNewProject}
         onBranchClick={onOpenGit}
+        showContext={messages.length === 0}
         externalText={info?.extensionUi?.editorText}
         banner={goal?.objective && goal.status !== 'idle' ? (
           <button

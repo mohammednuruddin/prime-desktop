@@ -20,6 +20,7 @@ const DEFAULTS: AppSettings = {
   checkpoints: true,
   dockBadge: false,
   thinkingLevel: 'medium',
+  showReasoning: true,
   autoCompaction: true,
   autoRetry: true,
   model: null,

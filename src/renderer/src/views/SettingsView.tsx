@@ -278,6 +278,18 @@ export default function SettingsView({ settings, activeAgentId, onChange }: Prop
 
       <section className="panel">
         <div className="panel-head">Model & reasoning</div>
+        <button
+          type="button"
+          className={`setting-row setting-choice${settings.showReasoning !== false ? ' on' : ''}`}
+          aria-pressed={settings.showReasoning !== false}
+          onClick={() => set({ showReasoning: settings.showReasoning === false })}
+        >
+          <div>
+            <div className="setting-title">Reasoning</div>
+            <div className="setting-desc">Show model reasoning traces inline in chat.</div>
+          </div>
+          <span className="setting-choice-state">{settings.showReasoning !== false ? 'On' : 'Off'}</span>
+        </button>
         <label className="setting-row">
           <div>
             <div className="setting-title">Thinking level</div>
