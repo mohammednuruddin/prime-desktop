@@ -17,6 +17,9 @@ const api = {
   agentStats: (agentId: string) => ipcRenderer.invoke(IPC.agentStats, agentId),
   agentSessions: (agentId?: string) => ipcRenderer.invoke(IPC.agentSessions, agentId),
   agentResume: (agentId: string, path: string) => ipcRenderer.invoke(IPC.agentResume, agentId, path),
+  agentSessionDelete: (agentId: string, path: string) => ipcRenderer.invoke(IPC.agentSessionDelete, agentId, path),
+  sessionPinsGet: () => ipcRenderer.invoke(IPC.sessionPinsGet),
+  sessionPinSet: (path: string, pinned: boolean) => ipcRenderer.invoke(IPC.sessionPinSet, path, pinned),
   agentCommands: (agentId: string) => ipcRenderer.invoke(IPC.agentCommands, agentId),
   agentHarness: (agentId: string, action: string, input?: Record<string, unknown>) =>
     ipcRenderer.invoke(IPC.agentHarness, agentId, action, input),
@@ -40,6 +43,9 @@ const api = {
     return () => ipcRenderer.removeListener(IPC.terminalExit, listener)
   },
   fleetObserve: (agentId: string, sessionId: string) => ipcRenderer.invoke(IPC.fleetObserve, agentId, sessionId),
+  fleetTree: (agentId: string) => ipcRenderer.invoke(IPC.fleetTree, agentId),
+  fleetMessages: (agentId: string, activeSessionId: string) =>
+    ipcRenderer.invoke(IPC.fleetMessages, agentId, activeSessionId),
   fleetUnobserve: (sessionId: string) => ipcRenderer.invoke(IPC.fleetUnobserve, sessionId),
   fleetSend: (agentId: string, target: string, message: string, mode?: string) =>
     ipcRenderer.invoke(IPC.fleetSend, agentId, target, message, mode),

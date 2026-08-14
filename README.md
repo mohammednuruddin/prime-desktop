@@ -22,7 +22,7 @@ npm run typecheck
 npm run build
 ```
 
-The app starts Prime Agent in RPC mode for each opened project. Session data remains managed by Prime Agent in its normal local session store.
+The app connects each opened project to Prime Agent’s resident daemon. Prime Agent remains the source of truth for sessions, queues, goals, schedules, resources, and harness state.
 
 ## Packaging
 

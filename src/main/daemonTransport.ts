@@ -3,30 +3,46 @@ import { spawn } from 'child_process'
 import { realpathSync } from 'fs'
 import { dirname, join } from 'path'
 import { pathToFileURL } from 'url'
-import type { AppSettings } from '@shared/types'
+import type { AppSettings, SubagentNode } from '@shared/types'
 
 export interface DaemonConnection {
   subscribe(listener: (event: Record<string, unknown>) => void): () => void
   getState(): Promise<Record<string, unknown>>
+  getInitialSnapshot(): Promise<Record<string, unknown>>
   getMessages(): Promise<unknown[]>
   getCommands(): Promise<unknown[]>
+  getResourceSnapshot(): Promise<Record<string, unknown>>
+  getModelCatalog(): Promise<Record<string, unknown>>
   getAvailableModels(): Promise<unknown[]>
   getSessionStats(): Promise<Record<string, unknown>>
   getSessionContext(): Promise<Record<string, unknown>>
   getSessionTree(): Promise<{ tree: DaemonTreeNode[]; leafId: string | null }>
   getUserMessagesForForking(): Promise<unknown[]>
+  getQueue(): Promise<{ steering: string[]; followUp: string[] }>
+  mutateQueuedMessage?(
+    lane: 'steering' | 'followUp',
+    index: number,
+    expectedText: string,
+    mutation: { type: 'delete' } | { type: 'move'; direction: -1 | 1 } | { type: 'replace'; text: string; lane: 'steering' | 'followUp' }
+  ): Promise<'applied' | 'rejected' | 'invalid' | 'unsupported'>
+  clearQueue(): Promise<{ steering: string[]; followUp: string[] }>
+  abortAndClearQueue(): Promise<{ steering: string[]; followUp: string[] }>
   getLastAssistantText(): Promise<string | undefined>
   getSystemPrompt(): Promise<string>
   respondToExtensionUiRequest(id: string, response: Record<string, unknown>): Promise<void>
   prompt(message: string, options?: Record<string, unknown>): Promise<void>
+  startSideQuestion(id: string, question: string, previousTurns?: { question: string; answer: string }[]): Promise<void>
+  abortSideQuestion(id: string): Promise<boolean>
   steer(message: string, images?: unknown[]): Promise<void>
   followUp(message: string, images?: unknown[]): Promise<void>
   abort(): Promise<void>
-  executeBash(command: string): Promise<void>
+  cancelRlmChild(childId: string): Promise<boolean>
+  executeBash(command: string, options?: Record<string, unknown>): Promise<void>
   setModel(provider: string, modelId: string): Promise<unknown>
   setScopedModels(models: { provider: string; modelId: string }[]): Promise<void>
   setThinkingLevel(level: string): Promise<void>
   setServiceTier(tier: 'default' | 'priority'): Promise<void>
+  setTransport(transport: 'sse' | 'websocket' | 'websocket-cached' | 'auto'): Promise<void>
   setAutoCompactionEnabled(enabled: boolean): Promise<void>
   setAutoRetryEnabled(enabled: boolean): Promise<void>
   compact(instructions?: string): Promise<unknown>
@@ -35,13 +51,17 @@ export interface DaemonConnection {
   newSession(options?: Record<string, unknown>): Promise<unknown>
   switchSession(path: string, options?: Record<string, unknown>): Promise<unknown>
   fork(entryId: string, options?: Record<string, unknown>): Promise<unknown>
-  navigateTree(targetId: string): Promise<unknown>
+  navigateTree(targetId: string, options?: Record<string, unknown>): Promise<unknown>
   importFromJsonl(path: string, cwd?: string): Promise<unknown>
   exportToHtml(path?: string): Promise<string>
+  exportToJsonl(path?: string): Promise<string>
+  setSessionEntryLabel(entryId: string, label?: string): Promise<void>
   setSessionName(name: string): Promise<void>
   getRlmMaxDepthStatus(): Promise<{ maxDepth: number; source: string }>
   setRlmMaxDepth(maxDepth: number, options?: { global?: boolean }): Promise<{ maxDepth: number; source: string }>
   listCronJobs(options?: Record<string, unknown>): Promise<unknown[]>
+  listHeartbeats(): Promise<unknown[]>
+  manageHeartbeat(activeSessionId: string, jobId: string, action: 'pause' | 'resume' | 'stop'): Promise<unknown>
   addCronJob(schedule: string, prompt: string): Promise<unknown>
   cancelCronJob(id: string): Promise<unknown>
   getHeartbeat(): Promise<unknown>
@@ -59,6 +79,9 @@ export interface DaemonTreeNode {
     type: string
     message?: unknown
     timestamp?: string
+    customType?: string
+    data?: unknown
+    [key: string]: unknown
   }
   label?: string
   children: DaemonTreeNode[]
@@ -163,6 +186,7 @@ function responseData(response: Record<string, unknown>, command: string): Recor
 export class DaemonTransport extends EventEmitter {
   private client: DaemonClientLike | null = null
   private connection: DaemonConnection | null = null
+  private subagentReader: { selector: string; connection: DaemonConnection } | null = null
   private unsubscribe: (() => void) | null = null
   private exitHandlers = new Set<() => void>()
   private started = false
@@ -190,7 +214,18 @@ export class DaemonTransport extends EventEmitter {
       const slash = model?.indexOf('/') ?? -1
       const config: Record<string, unknown> = {
         cwd: this.options.cwd,
-        thinking: this.options.settings.thinkingLevel
+        thinking: this.options.settings.thinkingLevel,
+        autonomous: {
+          enabled: this.options.settings.autonomous.enabled,
+          maxContinuations: this.options.settings.autonomous.maxContinuations,
+          maxTurns: this.options.settings.autonomous.maxTurns,
+          maxTokens: this.options.settings.autonomous.maxTokens,
+          timeoutMs: this.options.settings.autonomous.maxSeconds * 1000,
+          gates: {
+            commands: this.options.settings.autonomous.gates,
+            maxRetries: this.options.settings.autonomous.gateRetries
+          }
+        }
       }
       if (model) {
         if (slash > 0) {
@@ -232,6 +267,7 @@ export class DaemonTransport extends EventEmitter {
       })
       this.started = true
       await connection.setRlmMaxDepth(this.options.settings.rlmMaxDepth, { global: false })
+      await connection.setTransport(this.options.settings.transport).catch(() => {})
     } catch (error) {
       client.close()
       this.client = null
@@ -242,6 +278,105 @@ export class DaemonTransport extends EventEmitter {
   async withConnection<T>(task: (connection: DaemonConnection) => Promise<T>): Promise<T> {
     if (!this.connection || !this.running) throw new Error('Agent is not connected')
     return task(this.connection)
+  }
+
+  async getSubagentTree(): Promise<SubagentNode[]> {
+    if (!this.client || !this.connection || !this.running) return []
+    const [state, response, snapshot] = await Promise.all([
+      this.connection.getState(),
+      this.client.request({ type: 'list', includeClientOwned: true }, 30_000),
+      this.connection.getInitialSnapshot().catch(() => ({} as Record<string, unknown>))
+    ])
+    if (response.success !== true) throw new Error(String(response.error ?? 'Could not list subagents'))
+    const sessions = ((response.data as Record<string, unknown> | undefined)?.sessions ?? []) as Record<string, unknown>[]
+    const rootSessionId = String(state.sessionId ?? '')
+    if (!rootSessionId) return []
+    const childDetails = new Map<string, Record<string, unknown>>()
+    for (const child of ((snapshot.children as Record<string, unknown>[] | undefined) ?? [])) {
+      childDetails.set(String(child.id ?? ''), child)
+      if (child.activeSessionId) childDetails.set(String(child.activeSessionId), child)
+    }
+
+    const childrenByParent = new Map<string, Record<string, unknown>[]>()
+    for (const session of sessions) {
+      if (String(session.runtimeKind ?? '') !== 'subagent') continue
+      const parentSessionId = String(session.parentSessionId ?? '')
+      if (!parentSessionId) continue
+      const siblings = childrenByParent.get(parentSessionId) ?? []
+      siblings.push(session)
+      childrenByParent.set(parentSessionId, siblings)
+    }
+
+    const build = (parentSessionId: string, seen = new Set<string>()): SubagentNode[] => {
+      return (childrenByParent.get(parentSessionId) ?? [])
+        .map((session) => {
+          const sessionId = String(session.sessionId ?? session.id ?? '')
+          if (!sessionId || seen.has(sessionId)) return null
+          const nextSeen = new Set(seen).add(sessionId)
+          const rawStatus = String(session.status ?? session.activity ?? '').toLowerCase()
+          const lifecycle = String(session.lifecycle ?? '').toLowerCase()
+          const workerState = String(session.workerState ?? '').toLowerCase()
+          const status: SubagentNode['status'] = workerState === 'failed' || rawStatus === 'error' || rawStatus === 'failed'
+                ? 'error'
+            : ['working', 'queued', 'starting'].includes(rawStatus) || session.isStreaming === true
+              ? 'working'
+              : lifecycle === 'archived' || rawStatus === 'archived'
+                ? 'archived'
+                : 'idle'
+          const timestamp = Date.parse(String(session.lastActivityAt ?? session.modified ?? session.created ?? ''))
+          const firstMessage = String(session.firstMessage ?? '')
+          const detail = childDetails.get(String(session.rlmChildId ?? ''))
+            ?? childDetails.get(String(session.activeSessionId ?? ''))
+          return {
+            id: String(session.rlmChildId ?? session.activeSessionId ?? session.id ?? sessionId),
+            sessionId,
+            activeSessionId: session.activeSessionId ? String(session.activeSessionId) : null,
+            parentSessionId,
+            name: String(session.sessionName ?? session.rlmChildId ?? 'Subagent'),
+            depth: Number(session.rlmDepth ?? 1),
+            status,
+            task: firstMessage === '(no messages)' ? '' : firstMessage,
+            lastActivityAt: Number.isFinite(timestamp) ? timestamp : Date.now(),
+            model: typeof detail?.model === 'string' ? detail.model : undefined,
+            durationMs: typeof detail?.durationMs === 'number' ? detail.durationMs : undefined,
+            answerPreview: typeof detail?.answerPreview === 'string' ? detail.answerPreview : undefined,
+            toolUseCount: typeof detail?.toolUseCount === 'number' ? detail.toolUseCount : undefined,
+            tokenCount: typeof detail?.tokenCount === 'number' ? detail.tokenCount : undefined,
+            recap: typeof detail?.recap === 'string' ? detail.recap : undefined,
+            activity: detail?.activity as SubagentNode['activity'],
+            error: typeof detail?.error === 'string' ? detail.error : undefined,
+            children: build(sessionId, nextSeen)
+          } satisfies SubagentNode
+        })
+        .filter((node): node is Exclude<typeof node, null> => node !== null)
+        .sort((a, b) => a.lastActivityAt - b.lastActivityAt)
+    }
+
+    return build(rootSessionId)
+  }
+
+  async getSubagentMessages(selector: string): Promise<unknown[]> {
+    if (!this.client || !this.running || !selector) return []
+    if (this.subagentReader?.selector === selector) {
+      return this.subagentReader.connection.getMessages()
+    }
+    await this.releaseSubagentReader()
+    const { DaemonAgentConnection } = await loadModules(this.options.binary)
+    const connection = await DaemonAgentConnection.attach(this.client, selector, {
+      closeClientOnDispose: false,
+      supportsExtensionUi: false
+    })
+    this.subagentReader = { selector, connection }
+    return connection.getMessages()
+  }
+
+  async deleteSavedSession(sessionPath: string): Promise<void> {
+    if (!this.client || !this.running) throw new Error('Agent not connected')
+    const result = responseData(
+      await this.client.request({ type: 'delete_saved_session', sessionPath }, 30_000),
+      'delete_saved_session'
+    )
+    if (result.ok === false) throw new Error(String(result.error ?? 'Could not delete session'))
   }
 
   async send<T = unknown>(cmd: Record<string, unknown>): Promise<T> {
@@ -335,6 +470,9 @@ export class DaemonTransport extends EventEmitter {
       case 'bash':
         result = await c.executeBash(String(cmd.command ?? ''))
         break
+      case 'reload':
+        result = await c.reload()
+        break
       case 'export_html':
         result = { path: await c.exportToHtml(cmd.outputPath as string | undefined) }
         break
@@ -406,6 +544,7 @@ export class DaemonTransport extends EventEmitter {
     this.unsubscribe?.()
     this.unsubscribe = null
     try {
+      await this.releaseSubagentReader()
       await this.connection?.dispose()
     } finally {
       this.connection = null
@@ -413,5 +552,11 @@ export class DaemonTransport extends EventEmitter {
       this.client = null
       for (const fn of this.exitHandlers) fn()
     }
+  }
+
+  private async releaseSubagentReader(): Promise<void> {
+    const reader = this.subagentReader
+    this.subagentReader = null
+    await reader?.connection.dispose().catch(() => {})
   }
 }

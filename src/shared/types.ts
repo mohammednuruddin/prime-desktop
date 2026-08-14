@@ -1,4 +1,4 @@
-export type ViewId = 'chat' | 'fleet' | 'approval' | 'dashboard' | 'autonomy' | 'skills' | 'settings'
+export type ViewId = 'chat' | 'fleet' | 'approval' | 'dashboard' | 'autonomy' | 'skills' | 'diagnostics' | 'settings'
 
 export interface ProjectTab {
   id: string
@@ -32,6 +32,13 @@ export interface AgentInfo {
   sessionName: string | null
   sessionId: string | null
   version?: string
+  extensionUi?: {
+    title?: string
+    statuses: Record<string, string>
+    widgets: Record<string, { lines: string[]; placement: 'aboveEditor' | 'belowEditor' }>
+    workingMessage?: string
+    editorText?: string
+  }
 }
 
 export interface FleetAgent {
@@ -45,11 +52,47 @@ export interface FleetAgent {
   children: FleetAgent[]
 }
 
+export interface SubagentNode {
+  id: string
+  sessionId: string
+  activeSessionId: string | null
+  parentSessionId: string | null
+  name: string
+  depth: number
+  status: 'working' | 'idle' | 'archived' | 'error'
+  task: string
+  lastActivityAt: number
+  model?: string
+  durationMs?: number
+  answerPreview?: string
+  toolUseCount?: number
+  tokenCount?: number
+  recap?: string
+  activity?: { kind: 'waiting' | 'writing' | 'executing'; toolName?: string }
+  error?: string
+  children: SubagentNode[]
+}
+
 export interface ScheduleJob {
   id: string
   cron: string
   prompt: string
   active: boolean
+  status?: 'active' | 'paused' | 'completed' | 'cancelled'
+  source?: 'cron' | 'heartbeat' | 'rlm_heartbeat'
+  runtimeKind?: 'top-level' | 'subagent'
+  deliveryMode?: 'steer' | 'follow_up'
+  activeSessionId?: string
+  sessionId?: string
+  label?: string
+  schedule?: { kind: 'once' | 'cron' | 'interval'; expression: string; intervalMs?: number }
+  createdAt?: string
+  updatedAt?: string
+  nextRunAt?: string
+  lastRunAt?: string
+  lastSkippedAt?: string
+  lastError?: string
+  runCount?: number
 }
 
 export interface Heartbeat {
@@ -164,6 +207,86 @@ export interface AutonomousProgress {
   gates: { command: string; lastResult: 'pass' | 'fail' | null; attempts: number }[]
 }
 
+export interface GoalState {
+  active: boolean
+  status: 'idle' | 'active' | 'paused' | 'budget_limited' | 'complete' | 'error'
+  goalId?: string
+  objective?: string
+  tokenBudget?: number
+  tokensUsed: number
+  timeUsedSeconds: number
+  continuationsUsed: number
+  createdAt?: number
+  updatedAt?: number
+  lastReason?: string
+  lastError?: string
+}
+
+export interface ActionQueue {
+  steering: string[]
+  followUp: string[]
+  mutationSupported?: boolean
+}
+
+export interface SideQuestionTurn {
+  question: string
+  answer: string
+}
+
+export interface SessionTreeNode {
+  entry: {
+    id: string
+    parentId: string | null
+    type: string
+    timestamp: string
+    message?: unknown
+    [key: string]: unknown
+  }
+  label?: string
+  labelTimestamp?: string
+  children: SessionTreeNode[]
+}
+
+export interface ResourceSourceInfo {
+  path: string
+  source: string
+  scope: 'user' | 'project' | 'temporary'
+  origin: 'package' | 'top-level'
+  baseDir?: string
+}
+
+export interface ResourceItem {
+  type: 'skill' | 'prompt' | 'extension' | 'theme' | 'context'
+  name: string
+  description?: string
+  path?: string
+  sourceInfo?: ResourceSourceInfo
+}
+
+export interface ResourceSnapshot {
+  resources: ResourceItem[]
+  diagnostics: { type: 'warning' | 'error' | 'collision'; message: string; path?: string }[]
+}
+
+export interface ModelCatalog {
+  models: { id: string; name?: string; provider: string; reasoning?: boolean }[]
+  configuredProviders: string[]
+  transport: 'sse' | 'websocket' | 'websocket-cached' | 'auto'
+}
+
+export interface TraceInfo {
+  path: string
+  name: string
+  size: number
+  modifiedAt: number
+}
+
+export interface DaemonDiagnostic {
+  command: string
+  output: string
+  ok: boolean
+}
+
 export interface FileActivity {
   path: string
   kind: 'add' | 'change' | 'unlink'
@@ -220,6 +343,8 @@ export interface AppSettings {
   autoRetry: boolean
   model: string | null
   rlmMaxDepth: number
+  transport: 'sse' | 'websocket' | 'websocket-cached' | 'auto'
+  autonomous: AutonomousConfig
   themeMode: ThemeMode
   codeThemeId: string
   lightTheme: ThemeConfig
@@ -251,8 +376,13 @@ export const IPC = {
   agentStats: 'agent:stats',
   agentSessions: 'agent:sessions',
   agentResume: 'agent:resume',
+  agentSessionDelete: 'agent:session-delete',
+  sessionPinsGet: 'session:pins-get',
+  sessionPinSet: 'session:pin-set',
   agentCommands: 'agent:commands',
   fleetList: 'fleet:list',
+  fleetTree: 'fleet:tree',
+  fleetMessages: 'fleet:messages',
   fleetObserve: 'fleet:observe',
   fleetUnobserve: 'fleet:unobserve',
   fleetSend: 'fleet:send',

@@ -7,13 +7,13 @@ import ChatView from './views/ChatView'
 import FleetView from './views/FleetView'
 import ApprovalView from './views/ApprovalView'
 import DashboardView from './views/DashboardView'
-import AutonomyView from './views/AutonomyView'
 import SkillsView from './views/SkillsView'
 import SettingsView from './views/SettingsView'
+import DiagnosticsView from './views/DiagnosticsView'
 import Toasts from './components/Toasts'
 import DialogHost from './components/DialogHost'
 import WelcomeScreen from './components/WelcomeScreen'
-import type { PrimeEvent, Toast } from '@shared/types'
+import type { PrimeEvent, SubagentNode, Toast } from '@shared/types'
 import type { AccessMode } from './components/AccessPicker'
 import { applyAppTheme } from './lib/theme'
 
@@ -26,6 +26,7 @@ export default function App(): JSX.Element {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [sidePanelTab, setSidePanelTab] = useState<SidePanelTab>('subagents')
   const [selectedFleetEntry, setSelectedFleetEntry] = useState<FleetEntry | null>(null)
+  const [subagentTree, setSubagentTree] = useState<SubagentNode[]>([])
   const [accessMode, setAccessMode] = useState<AccessMode>('ask')
 
   useEffect(() => {
@@ -274,7 +275,9 @@ export default function App(): JSX.Element {
           agentId,
           label: (payload.type as string) ?? 'event',
           text: summarizeEvent(payload),
-          payload
+          payload,
+          ownerAgentId: agentId,
+          ownerSessionId: stateRef.current.agents[agentId]?.sessionId ?? null
         }
         mutate((s) => ({ ...s, fleet: [...s.fleet.slice(-199), entry] }))
         return
@@ -314,6 +317,52 @@ export default function App(): JSX.Element {
 
   const activeInfo = activeAgentId ? state.agents[activeAgentId] : null
   const activeTab = state.tabs.find((t) => t.id === state.activeTabId) ?? null
+  const activeFleet = useMemo(() => {
+    if (!activeAgentId) return []
+    return state.fleet.filter((entry) => (
+      entry.ownerAgentId === activeAgentId
+      && (!entry.ownerSessionId || entry.ownerSessionId === activeInfo?.sessionId)
+    ))
+  }, [state.fleet, activeAgentId, activeInfo?.sessionId])
+
+  useEffect(() => {
+    if (!activeAgentId) {
+      setSubagentTree([])
+      return
+    }
+    let disposed = false
+    let latestLoad = 0
+    const load = () => {
+      const requestId = ++latestLoad
+      void window.prime.fleetTree(activeAgentId)
+        .then((tree: SubagentNode[]) => {
+          if (!disposed && requestId === latestLoad) setSubagentTree(tree)
+        })
+        .catch(() => {})
+    }
+    setSelectedFleetEntry(null)
+    setSubagentTree([])
+    load()
+    const timer = window.setInterval(load, 2500)
+    const off = window.prime.onEvent((raw) => {
+      const event = raw as { agentId?: string; type?: string }
+      if (event.agentId !== activeAgentId) return
+      if (
+        event.type === 'tool_execution_start'
+        || event.type === 'tool_execution_end'
+        || event.type === 'custom_message'
+        || event.type === 'turn_end'
+        || event.type === 'session_replaced'
+        || event.type === 'session_resynced'
+      ) load()
+    })
+    return () => {
+      disposed = true
+      latestLoad += 1
+      window.clearInterval(timer)
+      off()
+    }
+  }, [activeAgentId, activeInfo?.sessionId])
 
   if (!state.ready) {
     return <div className="boot">Prime<span className="boot-dot" /></div>
@@ -367,7 +416,7 @@ export default function App(): JSX.Element {
           ) : (
             <>
               <main className="main-pane">
-                {state.view === 'chat' && activeAgentId && (
+                {(state.view === 'chat' || state.view === 'autonomy') && activeAgentId && (
                   <ChatView
                     agentId={activeAgentId}
                     info={activeInfo}
@@ -385,6 +434,13 @@ export default function App(): JSX.Element {
                       setSidePanelTab('git')
                       setSidePanelOpen(true)
                     }}
+                    subagents={subagentTree}
+                    showSubagentCard={!sidePanelOpen}
+                    onOpenSubagents={() => {
+                      setSelectedFleetEntry(null)
+                      setSidePanelTab('subagents')
+                      setSidePanelOpen(true)
+                    }}
                     onSelectProject={(projectId) => {
                       mutate((s) => ({ ...s, activeTabId: projectId, view: 'chat' }))
                       void window.prime.tabSelect(projectId)
@@ -398,36 +454,55 @@ export default function App(): JSX.Element {
                       }, 4000)
                     }}
                     onOpenSubagent={(entry) => {
-                      const stored = stateRef.current.fleet.find((item) => item.agentId === entry.agentId || item.label === entry.label)
-                      setSelectedFleetEntry(stored ? {
+                      const stored = findFleetEntry(activeFleet, entry)
+                      const node = findSubagentNode(subagentTree, entry)
+                      const merged = stored ? {
                         ...stored,
                         ...entry,
                         parentText: entry.parentText || stored.parentText,
                         childText: entry.childText || stored.childText
-                      } : entry)
+                      } : entry
+                      setSelectedFleetEntry({
+                        ...merged,
+                        payload: {
+                          ...(merged.payload ?? {}),
+                          ...(node ? { activeSessionId: node.activeSessionId, sessionId: node.sessionId, name: node.name, task: node.task } : {})
+                        }
+                      })
                       setSidePanelTab('subagents')
                       setSidePanelOpen(true)
                     }}
                     onSubagentActivity={(entry) => {
+                      const scopedEntry: FleetEntry = {
+                        ...entry,
+                        ownerAgentId: activeAgentId,
+                        ownerSessionId: activeInfo?.sessionId ?? null
+                      }
                       mutate((s) => {
-                        const index = s.fleet.findIndex((item) => item.agentId === entry.agentId || item.label === entry.label)
-                        if (index < 0) return { ...s, fleet: [...s.fleet, entry] }
+                        const scopedFleet = s.fleet.filter((item) => (
+                          item.ownerAgentId === activeAgentId && item.ownerSessionId === scopedEntry.ownerSessionId
+                        ))
+                        const matched = findFleetEntry(scopedFleet, scopedEntry)
+                        const index = matched ? s.fleet.indexOf(matched) : -1
+                        if (index < 0) return { ...s, fleet: [...s.fleet, scopedEntry] }
                         const fleet = [...s.fleet]
                         fleet[index] = {
                           ...fleet[index],
-                          ...entry,
-                          parentText: entry.parentText || fleet[index].parentText,
-                          childText: entry.childText || fleet[index].childText
+                          ...scopedEntry,
+                          parentText: scopedEntry.parentText || fleet[index].parentText,
+                          childText: scopedEntry.childText || fleet[index].childText,
+                          payload: { ...(fleet[index].payload ?? {}), ...(scopedEntry.payload ?? {}) }
                         }
                         return { ...s, fleet }
                       })
                       setSelectedFleetEntry((current) => {
-                        if (!current || (current.agentId !== entry.agentId && current.label !== entry.label)) return current
+                        if (!current || !entriesReferToSameAgent(current, entry)) return current
                         return {
                           ...current,
                           ...entry,
                           parentText: entry.parentText || current.parentText,
-                          childText: entry.childText || current.childText
+                          childText: entry.childText || current.childText,
+                          payload: { ...(entry.payload ?? {}), ...(current.payload ?? {}) }
                         }
                       })
                     }}
@@ -436,11 +511,12 @@ export default function App(): JSX.Element {
                 {state.view === 'fleet' && <FleetView state={state} />}
                 {state.view === 'approval' && <ApprovalView activeAgentId={activeAgentId} />}
                 {state.view === 'dashboard' && <DashboardView />}
-                {state.view === 'autonomy' && <AutonomyView />}
                 {state.view === 'skills' && <SkillsView activeAgentId={activeAgentId} />}
+                {state.view === 'diagnostics' && <DiagnosticsView activeAgentId={activeAgentId} />}
                 {state.view === 'settings' && (
                   <SettingsView
                     settings={state.settings}
+                    activeAgentId={activeAgentId}
                     onChange={(patch) => {
                       mutate((s) => ({ ...s, settings: { ...s.settings, ...patch } }))
                       void window.prime.settingsSet(patch)
@@ -451,7 +527,8 @@ export default function App(): JSX.Element {
               <SidePanel
                 open={sidePanelOpen}
                 onToggle={() => setSidePanelOpen((v) => !v)}
-                fleet={state.fleet}
+                fleet={activeFleet}
+                tree={subagentTree}
                 agentId={activeAgentId}
                 activeTab={sidePanelTab}
                 onTabChange={setSidePanelTab}
@@ -475,6 +552,51 @@ export default function App(): JSX.Element {
       }} />
     </div>
   )
+}
+
+function findSubagentNode(tree: SubagentNode[], entry: FleetEntry): SubagentNode | null {
+  const ids = entryIds(entry)
+  const exact = findSubagentNodeByIds(tree, ids)
+  if (exact || !isLegacyEntry(entry)) return exact
+  const named = flattenSubagentNodes(tree).filter((node) => node.name === entry.label)
+  return named.length === 1 ? named[0] : null
+}
+
+function findSubagentNodeByIds(tree: SubagentNode[], ids: Set<string>): SubagentNode | null {
+  for (const node of tree) {
+    if (ids.has(node.id) || ids.has(node.sessionId) || (node.activeSessionId ? ids.has(node.activeSessionId) : false)) return node
+    const child = findSubagentNodeByIds(node.children, ids)
+    if (child) return child
+  }
+  return null
+}
+
+function flattenSubagentNodes(tree: SubagentNode[]): SubagentNode[] {
+  return tree.flatMap((node) => [node, ...flattenSubagentNodes(node.children)])
+}
+
+function entryIds(entry: FleetEntry): Set<string> {
+  return new Set(
+    [entry.agentId, entry.payload?.activeSessionId, entry.payload?.sessionId]
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+  )
+}
+
+function isLegacyEntry(entry: FleetEntry): boolean {
+  return !entry.agentId || entry.agentId === 'subagent' || entry.agentId === entry.label
+}
+
+function entriesReferToSameAgent(left: FleetEntry, right: FleetEntry): boolean {
+  const rightIds = entryIds(right)
+  if ([...entryIds(left)].some((id) => rightIds.has(id))) return true
+  return isLegacyEntry(left) && isLegacyEntry(right) && left.label === right.label
+}
+
+function findFleetEntry(fleet: FleetEntry[], entry: FleetEntry): FleetEntry | undefined {
+  const exact = fleet.find((candidate) => entriesReferToSameAgent(candidate, entry) && (!isLegacyEntry(candidate) || !isLegacyEntry(entry)))
+  if (exact || !isLegacyEntry(entry)) return exact
+  const named = fleet.filter((candidate) => isLegacyEntry(candidate) && candidate.label === entry.label)
+  return named.length === 1 ? named[0] : undefined
 }
 
 function summarizeEvent(payload: Record<string, unknown>): string {

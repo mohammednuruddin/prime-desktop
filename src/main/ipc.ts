@@ -1,12 +1,13 @@
-import { BrowserWindow, dialog, ipcMain, Notification, shell, app } from 'electron'
+import { BrowserWindow, dialog, ipcMain, Notification, shell, app, nativeTheme } from 'electron'
 import { AgentManager } from './agentManager'
 import { BinaryManager } from './binary'
-import { getState, setSettings, setTabs } from './store'
+import { getState, setSessionPinned, setSettings, setTabs } from './store'
 import { listRules, addRule, removeRule } from './permissions'
 import { IPC, type AgentCommand, type ProjectTab, type AutonomousConfig } from '@shared/types'
 import { basename, join } from 'path'
 import { randomUUID } from 'crypto'
 import { TerminalManager } from './terminalManager'
+import { resolveThemeMode } from '@shared/themes'
 import {
   changelogText,
   listAuthProviders,
@@ -120,6 +121,14 @@ export function registerIpc(win: () => BrowserWindow | null, manager: AgentManag
   ipcMain.handle(IPC.agentStats, (_e, agentId: string) => manager.getStats(agentId))
   ipcMain.handle(IPC.agentSessions, (_e, agentId?: string) => manager.getSessions(agentId))
   ipcMain.handle(IPC.agentResume, (_e, agentId: string, sessionPath: string) => manager.resumeSession(agentId, sessionPath))
+  ipcMain.handle(IPC.agentSessionDelete, async (_e, agentId: string, sessionPath: string) => {
+    const sessions = await manager.deleteSession(agentId, sessionPath)
+    await setSessionPinned(sessionPath, false)
+    return sessions
+  })
+  ipcMain.handle(IPC.sessionPinsGet, async () => (await getState()).pinnedSessionFiles)
+  ipcMain.handle(IPC.sessionPinSet, (_e, sessionPath: string, pinned: boolean) =>
+    setSessionPinned(sessionPath, pinned))
   ipcMain.handle(IPC.agentCommands, (_e, agentId: string) => manager.getCommands(agentId))
   ipcMain.handle(
     IPC.agentHarness,
@@ -143,6 +152,9 @@ export function registerIpc(win: () => BrowserWindow | null, manager: AgentManag
   ipcMain.handle(IPC.terminalClose, (_e, agentId: string) => terminals.close(agentId))
 
   ipcMain.handle(IPC.fleetList, () => manager.allAgentInfos())
+  ipcMain.handle(IPC.fleetTree, (_e, agentId: string) => manager.getSubagentTree(agentId))
+  ipcMain.handle(IPC.fleetMessages, (_e, agentId: string, activeSessionId: string) =>
+    manager.getSubagentMessages(agentId, activeSessionId))
   ipcMain.handle(IPC.fleetObserve, (_e, agentId: string, sessionId: string) => manager.observeFleet(agentId, sessionId))
   ipcMain.handle(IPC.fleetUnobserve, (_e, sessionId: string) => manager.unobserve(sessionId))
   ipcMain.handle(IPC.fleetSend, (_e, agentId: string, target: string, message: string, mode?: string) =>
@@ -205,6 +217,15 @@ export function registerIpc(win: () => BrowserWindow | null, manager: AgentManag
   ipcMain.handle(IPC.settingsSet, async (_e, patch: unknown) => {
     const s = await getState()
     const settings = await setSettings(patch as Parameters<typeof setSettings>[0])
+    const variant = resolveThemeMode(settings.themeMode, nativeTheme.shouldUseDarkColors)
+    const windowTheme = variant === 'dark' ? settings.darkTheme : settings.lightTheme
+    const window = win()
+    if (window) {
+      window.setBackgroundColor(windowTheme.opaqueWindows ? windowTheme.surface : '#00000000')
+      if (process.platform === 'darwin') {
+        window.setVibrancy(windowTheme.opaqueWindows ? null : (variant === 'light' ? 'under-window' : 'sidebar'))
+      }
+    }
     const p = patch as Record<string, unknown>
     for (const a of manager.allAgentInfos()) {
       const agentId = a.id

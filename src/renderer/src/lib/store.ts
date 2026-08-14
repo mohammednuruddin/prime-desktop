@@ -47,6 +47,10 @@ export interface FleetEntry {
   parentText?: string
   childText?: string
   status?: 'running' | 'done' | 'error'
+  ownerAgentId?: string
+  ownerSessionId?: string | null
+  parentAgentId?: string | null
+  depth?: number
 }
 
 export interface AppState {
@@ -95,6 +99,16 @@ export const initialState: AppState = {
     autoRetry: true,
     model: null,
     rlmMaxDepth: 1,
+    transport: 'auto',
+    autonomous: {
+      enabled: false,
+      gates: [],
+      gateRetries: 2,
+      maxContinuations: 8,
+      maxTurns: 30,
+      maxTokens: 100000,
+      maxSeconds: 3600
+    },
     themeMode: 'system',
     codeThemeId: 'codex',
     lightTheme: PRIME_LIGHT_THEME,

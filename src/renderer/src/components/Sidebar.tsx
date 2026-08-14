@@ -22,6 +22,9 @@ export default function Sidebar({ state, activeAgentId, onView, onNewChat, onSel
   const [sessionLoading, setSessionLoading] = useState<string | null>(null)
   const [sessionError, setSessionError] = useState<string | null>(null)
   const [selectedSession, setSelectedSession] = useState<string | null>(null)
+  const [pinnedSessions, setPinnedSessions] = useState<Set<string>>(new Set())
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  const [deletingSession, setDeletingSession] = useState<string | null>(null)
 
   const agent = activeAgentId ? state.agents[activeAgentId] : null
   const working = agent && (agent.status === 'working' || agent.isStreaming)
@@ -58,6 +61,10 @@ export default function Sidebar({ state, activeAgentId, onView, onNewChat, onSel
     }
   }, [state.tabs])
 
+  useEffect(() => {
+    void window.prime.sessionPinsGet().then((paths: string[]) => setPinnedSessions(new Set(paths)))
+  }, [])
+
   // Auto-expand active tab
   useEffect(() => {
     if (state.activeTabId) {
@@ -74,9 +81,61 @@ export default function Sidebar({ state, activeAgentId, onView, onNewChat, onSel
     })
   }
 
+  function openSession(tabId: string, agentId: string, session: SessionSummary) {
+    onSelectTab?.(tabId)
+    onView('chat')
+    setSelectedSession(session.sessionFile)
+    setSessionLoading(session.sessionFile)
+    setSessionError(null)
+    void window.prime.agentResume(agentId, session.sessionFile)
+      .catch(() => setSessionError('This session could not be opened'))
+      .finally(() => setSessionLoading(null))
+  }
+
+  function setPinned(sessionFile: string, pinned: boolean) {
+    setPinnedSessions((previous) => {
+      const next = new Set(previous)
+      if (pinned) next.add(sessionFile)
+      else next.delete(sessionFile)
+      return next
+    })
+    void window.prime.sessionPinSet(sessionFile, pinned).catch(() => {
+      setPinnedSessions((previous) => {
+        const next = new Set(previous)
+        if (pinned) next.delete(sessionFile)
+        else next.add(sessionFile)
+        return next
+      })
+    })
+  }
+
+  function deleteSession(agentId: string, session: SessionSummary) {
+    setDeletingSession(session.sessionFile)
+    setSessionError(null)
+    void window.prime.agentSessionDelete(agentId, session.sessionFile)
+      .then((items: SessionSummary[]) => {
+        setSessionsByAgent((previous) => ({ ...previous, [agentId]: items }))
+        setPinnedSessions((previous) => {
+          const next = new Set(previous)
+          next.delete(session.sessionFile)
+          return next
+        })
+        setConfirmDelete(null)
+      })
+      .catch(() => setSessionError('This chat could not be deleted'))
+      .finally(() => setDeletingSession(null))
+  }
+
   if (collapsed) {
     return <aside className="sidebar collapsed" aria-hidden="true" />
   }
+
+  const pinnedRows = state.tabs.flatMap((tab) => {
+    const agentId = `agent-${tab.id}`
+    return (sessionsByAgent[agentId] ?? [])
+      .filter((session) => pinnedSessions.has(session.sessionFile))
+      .map((session) => ({ tab, agentId, session }))
+  })
 
   return (
     <aside className="sidebar">
@@ -165,18 +224,54 @@ export default function Sidebar({ state, activeAgentId, onView, onNewChat, onSel
           onClick={() => onView('skills')}
         >
           <AtIcon />
-          <span>Skills</span>
+          <span>Resources</span>
+        </button>
+        <button
+          className={`nav-link-btn ${state.view === 'diagnostics' ? 'active' : ''}`}
+          onClick={() => onView('diagnostics')}
+        >
+          <GitIcon />
+          <span>Daemon</span>
         </button>
       </div>
 
       {state.tabs.length > 0 && (
         <div className="sidebar-section">
+          {pinnedRows.length > 0 && (
+            <div className="sidebar-pinned-group">
+              <div className="section-title">Pinned</div>
+              {pinnedRows.map(({ tab, agentId: pinnedAgentId, session }) => {
+                const tabAgent = state.agents[pinnedAgentId]
+                const isCurrentSession = tab.id === state.activeTabId && (
+                  session.sessionId === tabAgent?.sessionId
+                  || (!tabAgent?.sessionId && selectedSession === session.sessionFile)
+                )
+                return (
+                  <SessionRow
+                    key={session.sessionFile}
+                    session={session}
+                    active={isCurrentSession}
+                    pinned
+                    loading={sessionLoading === session.sessionFile}
+                    confirmingDelete={confirmDelete === session.sessionFile}
+                    deleting={deletingSession === session.sessionFile}
+                    onOpen={() => openSession(tab.id, pinnedAgentId, session)}
+                    onPin={() => setPinned(session.sessionFile, false)}
+                    onRequestDelete={() => setConfirmDelete(session.sessionFile)}
+                    onCancelDelete={() => setConfirmDelete(null)}
+                    onConfirmDelete={() => deleteSession(pinnedAgentId, session)}
+                  />
+                )
+              })}
+            </div>
+          )}
           {state.tabs.map((tab) => {
             const isActive = tab.id === state.activeTabId
             const isExpanded = expandedTabs.has(tab.id)
             const tabAgentId = `agent-${tab.id}`
             const tabAgent = state.agents[tabAgentId]
             const sessions = sessionsByAgent[tabAgentId] ?? []
+            const unpinnedSessions = sessions.filter((session) => !pinnedSessions.has(session.sessionFile))
 
             return (
               <div key={tab.id} className="project-group">
@@ -216,33 +311,26 @@ export default function Sidebar({ state, activeAgentId, onView, onNewChat, onSel
                     {sessions.length === 0 ? (
                       <div className="sub-chat-item muted">No chats yet</div>
                     ) : (
-                      sessions.map((s) => {
+                      unpinnedSessions.map((s) => {
                         const isCurrentSession = isActive && (
                           s.sessionId === tabAgent?.sessionId
                           || (!tabAgent?.sessionId && selectedSession === s.sessionFile)
                         )
-                        const title = sessionDisplayName(s)
                         return (
-                          <button
+                          <SessionRow
                             key={s.sessionFile}
-                            className={`sub-chat-item ${isCurrentSession ? 'active' : ''}`}
-                            aria-current={isCurrentSession ? 'page' : undefined}
-                            onClick={() => {
-                              onSelectTab?.(tab.id)
-                              onView('chat')
-                              setSelectedSession(s.sessionFile)
-                              setSessionLoading(s.sessionFile)
-                              setSessionError(null)
-                              void window.prime.agentResume(tabAgentId, s.sessionFile)
-                                .catch(() => setSessionError('This session could not be opened'))
-                                .finally(() => setSessionLoading(null))
-                            }}
-                            title={title}
-                          >
-                            <span className="session-item-title">
-                              {title}{sessionLoading === s.sessionFile ? ' · Opening' : ''}
-                            </span>
-                          </button>
+                            session={s}
+                            active={isCurrentSession}
+                            pinned={false}
+                            loading={sessionLoading === s.sessionFile}
+                            confirmingDelete={confirmDelete === s.sessionFile}
+                            deleting={deletingSession === s.sessionFile}
+                            onOpen={() => openSession(tab.id, tabAgentId, s)}
+                            onPin={() => setPinned(s.sessionFile, true)}
+                            onRequestDelete={() => setConfirmDelete(s.sessionFile)}
+                            onCancelDelete={() => setConfirmDelete(null)}
+                            onConfirmDelete={() => deleteSession(tabAgentId, s)}
+                          />
                         )
                       })
                   )}
@@ -275,9 +363,81 @@ export default function Sidebar({ state, activeAgentId, onView, onNewChat, onSel
   )
 }
 
+function SessionRow({
+  session,
+  active,
+  pinned,
+  loading,
+  confirmingDelete,
+  deleting,
+  onOpen,
+  onPin,
+  onRequestDelete,
+  onCancelDelete,
+  onConfirmDelete
+}: {
+  session: SessionSummary
+  active: boolean
+  pinned: boolean
+  loading: boolean
+  confirmingDelete: boolean
+  deleting: boolean
+  onOpen: () => void
+  onPin: () => void
+  onRequestDelete: () => void
+  onCancelDelete: () => void
+  onConfirmDelete: () => void
+}): JSX.Element {
+  const title = sessionDisplayName(session)
+  return (
+    <div className={`sub-chat-item ${active ? 'active' : ''} ${confirmingDelete ? 'confirming-delete' : ''}`} aria-current={active ? 'page' : undefined}>
+      <button className="session-item-main" type="button" onClick={onOpen} title={title}>
+        <span className="session-item-title">{title}{loading ? ' · Opening' : ''}</span>
+      </button>
+      <div className={`session-row-actions ${confirmingDelete ? 'confirming' : ''}`}>
+        {confirmingDelete ? (
+          <>
+            <button className="session-action confirm" type="button" onClick={onConfirmDelete} disabled={deleting} title="Confirm delete" aria-label={`Delete ${title}`}>
+              <CheckIcon />
+            </button>
+            <button className="session-action cancel" type="button" onClick={onCancelDelete} disabled={deleting} title="Cancel" aria-label="Cancel delete">
+              <CrossIcon />
+            </button>
+          </>
+        ) : (
+          <>
+            <button className={`session-action pin ${pinned ? 'pinned' : ''}`} type="button" onClick={onPin} title={pinned ? 'Unpin chat' : 'Pin chat'} aria-label={pinned ? `Unpin ${title}` : `Pin ${title}`}>
+              <PinIcon />
+            </button>
+            <button className="session-action delete" type="button" onClick={onRequestDelete} title="Delete chat" aria-label={`Delete ${title}`}>
+              <TrashIcon />
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function sessionDisplayName(session: SessionSummary): string {
   const name = typeof session.name === 'string' ? session.name.trim() : ''
   return name || 'New thread'
+}
+
+function PinIcon() {
+  return <svg viewBox="0 0 24 24"><path d="M14.5 4.5l5 5-3 1.5-3.5 3.5v4l-1 1-3.5-5.5-4-4 1-1h4L9 5.5l1.5-3 4 2z" /><path d="M8.5 15.5L4 20" /></svg>
+}
+
+function TrashIcon() {
+  return <svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" /></svg>
+}
+
+function CheckIcon() {
+  return <svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+}
+
+function CrossIcon() {
+  return <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" /></svg>
 }
 
 /* ─── Icons ──────────────────────────────────────────────────── */

@@ -21,7 +21,11 @@ function createWindow(settings: AppSettings): void {
     title: 'Prime',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 18 },
-    backgroundColor: windowTheme.surface,
+    backgroundColor: windowTheme.opaqueWindows ? windowTheme.surface : '#00000000',
+    vibrancy: process.platform === 'darwin' && !windowTheme.opaqueWindows
+      ? (variant === 'light' ? 'under-window' : 'sidebar')
+      : undefined,
+    visualEffectState: process.platform === 'darwin' && !windowTheme.opaqueWindows ? 'active' : undefined,
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       contextIsolation: true,
@@ -39,6 +43,17 @@ function createWindow(settings: AppSettings): void {
     void mainWindow.loadURL(devUrl)
   } else {
     void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+  }
+}
+
+function updateWindowTheme(settings: AppSettings): void {
+  const window = mainWindow
+  if (!window || window.isDestroyed()) return
+  const variant = resolveThemeMode(settings.themeMode, nativeTheme.shouldUseDarkColors)
+  const windowTheme = variant === 'dark' ? settings.darkTheme : settings.lightTheme
+  window.setBackgroundColor(windowTheme.opaqueWindows ? windowTheme.surface : '#00000000')
+  if (process.platform === 'darwin') {
+    window.setVibrancy(windowTheme.opaqueWindows ? null : (variant === 'light' ? 'under-window' : 'sidebar'))
   }
 }
 
@@ -106,6 +121,9 @@ app.whenReady().then(async () => {
   await binary.check()
 
   createWindow(state.settings)
+  nativeTheme.on('updated', () => {
+    void getState().then((latest) => updateWindowTheme(latest.settings))
+  })
 
   for (const tab of state.tabs) {
     try {

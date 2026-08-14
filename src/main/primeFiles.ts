@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'fs'
-import { readFile, writeFile, mkdir } from 'fs/promises'
+import { readFile, writeFile, mkdir, rename, chmod } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 import { spawn } from 'child_process'
@@ -30,6 +30,14 @@ const PROVIDERS: { id: string; name: string }[] = [
 
 type AuthFile = Record<string, { type?: string; key?: string }>
 
+async function writeJsonAtomic(path: string, value: unknown, mode?: number): Promise<void> {
+  await mkdir(PRIME_AGENT_DIR, { recursive: true })
+  const temp = `${path}.${process.pid}.tmp`
+  await writeFile(temp, JSON.stringify(value, null, 2), mode ? { mode } : undefined)
+  if (mode) await chmod(temp, mode)
+  await rename(temp, path)
+}
+
 async function readAuth(): Promise<AuthFile> {
   try {
     return JSON.parse(await readFile(AUTH_PATH, 'utf8')) as AuthFile
@@ -52,14 +60,13 @@ export async function setAuthKey(provider: string, key: string): Promise<void> {
   await mkdir(PRIME_AGENT_DIR, { recursive: true })
   const data = await readAuth()
   data[provider] = { type: 'api_key', key: key.trim() }
-  await writeFile(AUTH_PATH, JSON.stringify(data, null, 2))
+  await writeJsonAtomic(AUTH_PATH, data, 0o600)
 }
 
 export async function removeAuth(provider: string): Promise<void> {
   const data = await readAuth()
   delete data[provider]
-  await mkdir(PRIME_AGENT_DIR, { recursive: true })
-  await writeFile(AUTH_PATH, JSON.stringify(data, null, 2))
+  await writeJsonAtomic(AUTH_PATH, data, 0o600)
 }
 
 export function openPrimeAgentLogin(): void {
@@ -79,20 +86,64 @@ export async function readPrimeSettings(): Promise<Record<string, unknown>> {
 }
 
 export async function writePrimeRlmMaxDepth(maxDepth: number): Promise<void> {
-  await mkdir(PRIME_AGENT_DIR, { recursive: true })
   const data = await readPrimeSettings()
   data.rlmMaxDepth = maxDepth
-  await writeFile(PRIME_SETTINGS_PATH, JSON.stringify(data, null, 2))
+  await writeJsonAtomic(PRIME_SETTINGS_PATH, data)
 }
 
 export async function setAgentTracesEnabled(enabled: boolean): Promise<void> {
-  await mkdir(PRIME_AGENT_DIR, { recursive: true })
   const data = await readPrimeSettings()
   const current = data.agentTraces && typeof data.agentTraces === 'object'
     ? data.agentTraces as Record<string, unknown>
     : {}
   data.agentTraces = { ...current, enabled }
-  await writeFile(PRIME_SETTINGS_PATH, JSON.stringify(data, null, 2))
+  await writeJsonAtomic(PRIME_SETTINGS_PATH, data)
+}
+
+async function readMcpServersRaw(): Promise<Record<string, Record<string, unknown>>> {
+  const data = await readPrimeSettings()
+  const servers = data.mcpServers
+  return servers && typeof servers === 'object' && !Array.isArray(servers)
+    ? servers as Record<string, Record<string, unknown>>
+    : {}
+}
+
+export async function getMcpServers(): Promise<Record<string, Record<string, unknown>>> {
+  const servers = await readMcpServersRaw()
+  return Object.fromEntries(Object.entries(servers).map(([name, server]) => [name, {
+    type: server.type,
+    url: server.url,
+    oauth: server.oauth,
+    enabled: server.enabled,
+    bearerTokenEnvVar: server.bearerTokenEnvVar
+  }]))
+}
+
+export async function setMcpServer(
+  name: string,
+  config: { url: string; oauth: boolean; enabled: boolean; bearerTokenEnvVar?: string } | null
+): Promise<Record<string, Record<string, unknown>>> {
+  const key = name.trim()
+  if (!/^[a-zA-Z0-9._-]+$/.test(key)) throw new Error('MCP server name may use letters, numbers, dots, dashes, and underscores.')
+  const data = await readPrimeSettings()
+  const servers = await readMcpServersRaw()
+  if (config) {
+    const url = new URL(config.url)
+    if (url.protocol !== 'https:' && url.hostname !== 'localhost') throw new Error('MCP server URL must use HTTPS.')
+    servers[key] = {
+      ...(servers[key] ?? {}),
+      type: 'http',
+      url: url.toString(),
+      oauth: config.oauth,
+      enabled: config.enabled,
+      ...(config.bearerTokenEnvVar ? { bearerTokenEnvVar: config.bearerTokenEnvVar } : {})
+    }
+  } else {
+    delete servers[key]
+  }
+  data.mcpServers = servers
+  await writeJsonAtomic(PRIME_SETTINGS_PATH, data)
+  return getMcpServers()
 }
 
 export async function getAgentTracesEnabled(): Promise<boolean> {

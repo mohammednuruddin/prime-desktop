@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import AccessPicker, { type AccessMode } from './AccessPicker'
 import DepthSlider from './DepthSlider'
 import type { ModelOption } from '@shared/models'
 import type { ProjectTab } from '@shared/types'
-import { BUILTIN_SLASH_COMMANDS, getSlashCommand, isBuiltinSlash, parseSlash } from '@shared/slash'
+import { BUILTIN_SLASH_COMMANDS, getSlashCommand, isBuiltinSlash, parseSlash, slashOpensOnPick } from '@shared/slash'
 
 function mergeCommands(
   api: { name: string; description?: string }[]
@@ -46,6 +46,8 @@ interface Props {
   onSelectProject?: (projectId: string) => void
   onNewProject?: () => void
   onBranchClick?: () => void
+  externalText?: string
+  banner?: ReactNode
 }
 
 const EFFORT_LEVELS = ['Light', 'Medium', 'High', 'Extra High', 'Max']
@@ -93,7 +95,9 @@ export default function Composer({
   activeProjectId,
   onSelectProject,
   onNewProject,
-  onBranchClick
+  onBranchClick,
+  externalText,
+  banner
 }: Props): JSX.Element {
   const [text, setText] = useState('')
   const [images, setImages] = useState<{ type: 'image'; data: string; mimeType: string }[]>([])
@@ -111,6 +115,12 @@ export default function Composer({
   const pickerRef = useRef<HTMLDivElement>(null)
   const projectPickerRef = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (externalText === undefined) return
+    setText(externalText)
+    requestAnimationFrame(() => taRef.current?.focus())
+  }, [externalText])
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -321,6 +331,7 @@ export default function Composer({
           )}
         </div>
       )}
+      {banner}
       <div className={`composer-card ${busy ? 'busy' : ''}`}>
         {/* Command palette */}
         {showCmds && (
@@ -333,7 +344,10 @@ export default function Composer({
                 className={`cmd-item ${i === cmdIndex ? 'active' : ''}`}
                 onMouseEnter={() => setCmdIndex(i)}
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={() => insertCommand(c.name)}
+                onClick={() => {
+                  if (slashOpensOnPick(c.name)) runSlash(`/${c.name}`)
+                  else insertCommand(c.name)
+                }}
               >
                 <span className="cmd-item-icon"><CommandGlyph name={c.name} /></span>
                 <span className="cmd-name">{displayCommandName(c.name)}</span>
@@ -663,7 +677,7 @@ function CommandGlyph({ name }: { name: string }): JSX.Element {
   else if (n === 'new' || n === 'clear') inner = <path d="M12 5v14M5 12h14" />
   else if (n === 'model') inner = <><circle cx="12" cy="12" r="3" /><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4L7 17M17 7l1.4-1.4" /></>
   else if (n === 'effort' || n === 'thinking') inner = <path d="M12 3a6 6 0 00-4 10c.6.6 1 1.4 1 2.2V17h6v-1.8c0-.8.4-1.6 1-2.2A6 6 0 0012 3zM10 21h4" />
-  else if (n === 'goal') inner = <circle cx="12" cy="12" r="8" />
+  else if (n === 'goal') inner = <><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /></>
   else if (n === 'login' || n === 'logout') inner = <path d="M10 17l5-5-5-5M15 12H3M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4" />
   else if (n === 'fork' || n === 'tree' || n === 'clone') inner = <path d="M6 3v12M6 15a3 3 0 100 6 3 3 0 000-6zM18 3a3 3 0 100 6 3 3 0 000-6zM18 21a3 3 0 100-6 3 3 0 000 6zM6 9h6a6 6 0 016 6" />
   else if (n === 'settings') inner = <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 00.34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0015 19.4a1.7 1.7 0 00-1 .6V21h-4v-1a1.7 1.7 0 00-1-.6 1.7 1.7 0 00-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-.6-1H3v-4h1a1.7 1.7 0 00.6-1 1.7 1.7 0 00-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-.6V3h4v1a1.7 1.7 0 001 .6 1.7 1.7 0 001.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 00.6 1H21v4h-1a1.7 1.7 0 00-.6 1z" /></>

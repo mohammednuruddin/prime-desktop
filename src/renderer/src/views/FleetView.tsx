@@ -16,6 +16,11 @@ export default function FleetView({ state }: Props): JSX.Element {
   const [msg, setMsg] = useState('')
   const [mode, setMode] = useState('auto')
   const [hearts, setHearts] = useState<Record<string, string>>({})
+  const [heartbeatFor, setHeartbeatFor] = useState<string | null>(null)
+  const [heartbeatSchedule, setHeartbeatSchedule] = useState('every 5m')
+  const [heartbeatPrompt, setHeartbeatPrompt] = useState('')
+  const [heartbeatMode, setHeartbeatMode] = useState<'steer' | 'follow_up'>('steer')
+  const [heartbeats, setHeartbeats] = useState<HeartbeatRow[]>([])
 
   useEffect(() => {
     void window.prime.fleetSchedules().then((res) => {
@@ -39,6 +44,29 @@ export default function FleetView({ state }: Props): JSX.Element {
   }, [])
 
   const agents = Object.values(state.agents)
+  const heartbeatAgentId = agents[0]?.id
+  const loadHeartbeats = () => {
+    if (!heartbeatAgentId) {
+      setHeartbeats([])
+      return
+    }
+    void window.prime.agentHarness(heartbeatAgentId, 'heartbeats')
+      .then((result) => setHeartbeats(((result as { heartbeats?: HeartbeatRow[] }).heartbeats ?? [])))
+      .catch(() => {})
+  }
+
+  useEffect(() => {
+    loadHeartbeats()
+    const off = window.prime.onEvent((raw) => {
+      const event = raw as { type?: string }
+      if (event.type === 'heartbeats_changed') loadHeartbeats()
+    })
+    const timer = window.setInterval(loadHeartbeats, 5000)
+    return () => {
+      off()
+      window.clearInterval(timer)
+    }
+  }, [heartbeatAgentId])
 
   return (
     <div className="view scheduled-page">
@@ -87,12 +115,43 @@ export default function FleetView({ state }: Props): JSX.Element {
                   const h = await window.prime.fleetHeartbeat(a.id)
                   const text = h ? `Active: ${h.prompt.slice(0, 60)}` : 'No heartbeat'
                   setHearts((p) => ({ ...p, [a.id]: text }))
+                  setHeartbeatFor(heartbeatFor === a.id ? null : a.id)
                 }}
               >
                 Heartbeat
               </button>
             </div>
             {hearts[a.id] && <div className="fleet-heartbeat">{hearts[a.id]}</div>}
+            {heartbeatFor === a.id && (
+              <div className="schedule-form">
+                <input className="field" value={heartbeatSchedule} onChange={(event) => setHeartbeatSchedule(event.target.value)} placeholder="every 5m" />
+                <input className="field" value={heartbeatPrompt} onChange={(event) => setHeartbeatPrompt(event.target.value)} placeholder="heartbeat instruction" />
+                <div className="row-gap">
+                  <select className="field" value={heartbeatMode} onChange={(event) => setHeartbeatMode(event.target.value as typeof heartbeatMode)}>
+                    <option value="steer">steer when busy</option>
+                    <option value="follow_up">follow up when idle</option>
+                  </select>
+                  <button
+                    className="btn primary small"
+                    disabled={!heartbeatSchedule.trim() || !heartbeatPrompt.trim()}
+                    onClick={() => {
+                      void window.prime.agentHarness(a.id, 'heartbeat_set', {
+                        schedule: heartbeatSchedule.trim(),
+                        prompt: heartbeatPrompt.trim(),
+                        deliveryMode: heartbeatMode
+                      }).then(() => {
+                        setHeartbeatFor(null)
+                        setHeartbeatPrompt('')
+                        setHearts((value) => ({ ...value, [a.id]: `Active: ${heartbeatSchedule}` }))
+                        loadHeartbeats()
+                      })
+                    }}
+                  >
+                    Set heartbeat
+                  </button>
+                </div>
+              </div>
+            )}
             {addFor === a.id && (
               <div className="schedule-form">
                 <input
@@ -184,6 +243,33 @@ export default function FleetView({ state }: Props): JSX.Element {
       </section>
 
       <section className="panel">
+        <div className="panel-head">Session heartbeats</div>
+        {heartbeats.length === 0 && <div className="cmd-empty">No heartbeats across this daemon.</div>}
+        {heartbeats.map(({ job, sessionName, firstMessage }) => (
+          <div className="schedule-row heartbeat-row" key={`${job.activeSessionId}-${job.id}`}>
+            <div className="heartbeat-session">
+              <strong>{sessionName || job.label || job.sessionId.slice(0, 8)}</strong>
+              <span>{firstMessage || job.prompt}</span>
+            </div>
+            <code>{job.schedule.expression}</code>
+            <span className={`badge-ok ${job.status}`}>{job.status}</span>
+            {job.nextRunAt && <span className="schedule-next">next {new Date(job.nextRunAt).toLocaleString()}</span>}
+            <div className="row-gap">
+              {job.status === 'active' && (
+                <button className="btn ghost small" onClick={() => manageHeartbeat(job, 'pause')}>pause</button>
+              )}
+              {job.status === 'paused' && (
+                <button className="btn ghost small" onClick={() => manageHeartbeat(job, 'resume')}>resume</button>
+              )}
+              {!['cancelled', 'completed'].includes(job.status) && (
+                <button className="btn ghost small" onClick={() => manageHeartbeat(job, 'stop')}>stop</button>
+              )}
+            </div>
+          </div>
+        ))}
+      </section>
+
+      <section className="panel">
         <div className="panel-head">Schedules</div>
         {Object.entries(schedules).map(([agentId, jobs]) => (
           <div key={agentId} className="schedule-group">
@@ -226,4 +312,28 @@ export default function FleetView({ state }: Props): JSX.Element {
       </section>
     </div>
   )
+
+  function manageHeartbeat(job: HeartbeatRow['job'], action: 'pause' | 'resume' | 'stop') {
+    if (!heartbeatAgentId) return
+    void window.prime.agentHarness(heartbeatAgentId, 'heartbeat_manage', {
+      activeSessionId: job.activeSessionId,
+      jobId: job.id,
+      action
+    }).then(loadHeartbeats)
+  }
+}
+
+interface HeartbeatRow {
+  sessionName?: string
+  firstMessage?: string
+  job: {
+    id: string
+    activeSessionId: string
+    sessionId: string
+    label?: string
+    prompt: string
+    status: 'active' | 'paused' | 'completed' | 'cancelled'
+    schedule: { expression: string }
+    nextRunAt?: string
+  }
 }

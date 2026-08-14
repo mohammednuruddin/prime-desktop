@@ -21,8 +21,14 @@ import {
   unstageAll,
   commitStaged
 } from './git'
-import { getState, setModel as persistModel } from './store'
-import { getAgentTracesEnabled, setAgentTracesEnabled, writePrimeRlmMaxDepth } from './primeFiles'
+import { getState, setModel as persistModel, setSettings } from './store'
+import {
+  getAgentTracesEnabled,
+  setAgentTracesEnabled,
+  writePrimeRlmMaxDepth,
+  getMcpServers,
+  setMcpServer
+} from './primeFiles'
 import { modelKeyFromState, parseModelList } from '@shared/models'
 import { isInternalStateRestoreMessage } from '@shared/messageVisibility'
 import type {
@@ -68,6 +74,7 @@ interface Agent {
   commands: unknown[] | null
   stats: unknown
   lastEvent: string
+  pendingRuntimeReload: boolean
 }
 
 export class AgentManager extends EventEmitter {
@@ -125,7 +132,8 @@ export class AgentManager extends EventEmitter {
       availableModels: null,
       commands: null,
       stats: null,
-      lastEvent: ''
+      lastEvent: '',
+      pendingRuntimeReload: false
     }
     this.agents.set(id, agent)
     this.publish(agent)
@@ -235,6 +243,14 @@ export class AgentManager extends EventEmitter {
         // session_action_update event is a read-only snapshot for UI display;
         // replaying an item here re-enqueues it after every turn forever.
         this.refreshStats(agent)
+        if (agent.pendingRuntimeReload) {
+          agent.pendingRuntimeReload = false
+          void agent.client?.send({ type: 'reload' }).then(() => {
+            this.toast(agent, 'info', 'Agent messaging runtime refreshed. Retry the follow-up.')
+          }).catch((error) => {
+            console.error('[prime-desktop] runtime recovery reload failed:', error)
+          })
+        }
         break
       case 'message_update': {
         const m = ev.message as Record<string, unknown> | undefined
@@ -267,6 +283,7 @@ export class AgentManager extends EventEmitter {
         break
       }
       case 'session_replaced': {
+        agent.info.extensionUi = undefined
         agent.messages = this.visibleMessages((ev.messages as unknown[] | undefined) ?? [])
         const state = (ev.state as Record<string, unknown> | undefined) ?? {}
         agent.info.sessionId = (state.sessionId as string | null) ?? agent.info.sessionId
@@ -276,6 +293,7 @@ export class AgentManager extends EventEmitter {
         break
       }
       case 'session_resynced': {
+        agent.info.extensionUi = undefined
         const snapshot = (ev.snapshot as Record<string, unknown> | undefined) ?? {}
         agent.messages = this.visibleMessages((snapshot.messages as unknown[] | undefined) ?? [])
         const state = (snapshot.state as Record<string, unknown> | undefined) ?? {}
@@ -285,6 +303,9 @@ export class AgentManager extends EventEmitter {
         this.syncStatsFromMessages(agent)
         break
       }
+      case 'session_started':
+        agent.info.extensionUi = undefined
+        break
       case 'turn_start':
         agent.info.status = 'working'
         break
@@ -301,6 +322,12 @@ export class AgentManager extends EventEmitter {
       case 'tool_execution_start':
       case 'tool_execution_update':
       case 'tool_execution_end':
+        if (
+          String(ev.toolName ?? '').toLowerCase() === 'ipython' &&
+          JSON.stringify(ev.result ?? ev).includes('host request type \\"agent_message.send\\" is not available')
+        ) {
+          agent.pendingRuntimeReload = true
+        }
         this.emitToRenderer('events', event)
         break
       case 'session_action_update': {
@@ -335,6 +362,35 @@ export class AgentManager extends EventEmitter {
           this.notifyIfDesired(agent, `Agent needs input: ${(ev.title as string) ?? method}`)
         } else if ((method as string) === 'notify') {
           this.toast(agent, (ev.notifyType as string) === 'error' ? 'error' : 'info', (ev.message as string) ?? '')
+        } else {
+          const extensionUi = agent.info.extensionUi ?? { statuses: {}, widgets: {} }
+          if (method === 'setStatus') {
+            const key = String(ev.statusKey ?? 'extension')
+            const text = typeof ev.statusText === 'string' ? ev.statusText : undefined
+            const statuses = { ...extensionUi.statuses }
+            if (text) statuses[key] = text
+            else delete statuses[key]
+            agent.info.extensionUi = { ...extensionUi, statuses }
+          } else if (method === 'setWidget') {
+            const key = String(ev.widgetKey ?? 'extension')
+            const widgets = { ...extensionUi.widgets }
+            const content = Array.isArray(ev.widgetLines) ? ev.widgetLines.map(String) : undefined
+            if (content) {
+              widgets[key] = {
+                lines: content,
+                placement: ev.widgetPlacement === 'belowEditor' ? 'belowEditor' : 'aboveEditor'
+              }
+            } else {
+              delete widgets[key]
+            }
+            agent.info.extensionUi = { ...extensionUi, widgets }
+          } else if (method === 'setTitle') {
+            agent.info.extensionUi = { ...extensionUi, title: typeof ev.title === 'string' ? ev.title : undefined }
+          } else if (method === 'setWorkingMessage') {
+            agent.info.extensionUi = { ...extensionUi, workingMessage: typeof ev.message === 'string' ? ev.message : undefined }
+          } else if (method === 'setEditorText' || method === 'set_editor_text') {
+            agent.info.extensionUi = { ...extensionUi, editorText: typeof ev.text === 'string' ? ev.text : '' }
+          }
         }
         break
       }
@@ -567,6 +623,22 @@ export class AgentManager extends EventEmitter {
     return res
   }
 
+  async deleteSession(agentId: string, sessionPath: string): Promise<SessionSummary[]> {
+    const agent = this.agents.get(agentId)
+    if (!agent?.client) throw new Error('Agent not connected')
+    const target = (await this.getSessions(agentId)).find((session) => session.sessionFile === sessionPath)
+    if (!target) return this.getSessions(agentId)
+    const wasActive = target.sessionId === agent.info.sessionId
+    if (wasActive) await this.newSession(agentId)
+    try {
+      await agent.client.deleteSavedSession(sessionPath)
+    } catch (error) {
+      if (wasActive) await this.resumeSession(agentId, sessionPath).catch(() => {})
+      throw error
+    }
+    return this.getSessions(agentId)
+  }
+
   async newSession(agentId: string): Promise<unknown> {
     const agent = this.agents.get(agentId)
     if (!agent?.client) throw new Error('Agent not connected')
@@ -616,11 +688,28 @@ export class AgentManager extends EventEmitter {
         const res = await a.client.send<{ jobs: unknown[] }>({ type: 'list_schedules' })
         out[a.id] = (res.jobs ?? []).map((j) => {
           const job = j as Record<string, unknown>
+          const schedule = job.schedule as Record<string, unknown> | undefined
+          const status = String(job.status ?? 'active') as ScheduleJob['status']
           return {
             id: String(job.id ?? ''),
-            cron: String(job.schedule ?? job.cron ?? ''),
+            cron: String(schedule?.expression ?? job.cron ?? ''),
             prompt: String(job.prompt ?? ''),
-            active: Boolean(job.active ?? true)
+            active: status === 'active',
+            status,
+            source: job.source as ScheduleJob['source'],
+            runtimeKind: job.runtimeKind as ScheduleJob['runtimeKind'],
+            deliveryMode: job.deliveryMode as ScheduleJob['deliveryMode'],
+            activeSessionId: typeof job.activeSessionId === 'string' ? job.activeSessionId : undefined,
+            sessionId: typeof job.sessionId === 'string' ? job.sessionId : undefined,
+            label: typeof job.label === 'string' ? job.label : undefined,
+            schedule: schedule as ScheduleJob['schedule'],
+            createdAt: typeof job.createdAt === 'string' ? job.createdAt : undefined,
+            updatedAt: typeof job.updatedAt === 'string' ? job.updatedAt : undefined,
+            nextRunAt: typeof job.nextRunAt === 'string' ? job.nextRunAt : undefined,
+            lastRunAt: typeof job.lastRunAt === 'string' ? job.lastRunAt : undefined,
+            lastSkippedAt: typeof job.lastSkippedAt === 'string' ? job.lastSkippedAt : undefined,
+            lastError: typeof job.lastError === 'string' ? job.lastError : undefined,
+            runCount: typeof job.runCount === 'number' ? job.runCount : undefined
           } as ScheduleJob
         })
       } catch {
@@ -648,9 +737,10 @@ export class AgentManager extends EventEmitter {
     const res = await agent.client.send<{ heartbeat: unknown } | null>({ type: 'get_heartbeat' }).catch(() => null)
     if (!res || !res.heartbeat) return null
     const h = res.heartbeat as Record<string, unknown>
+    const schedule = h.schedule as Record<string, unknown> | undefined
     return {
       id: (h.id as string) ?? null,
-      schedule: String(h.schedule ?? ''),
+      schedule: String(schedule?.expression ?? h.schedule ?? ''),
       prompt: String(h.prompt ?? ''),
       status: String(h.status ?? 'active')
     }
@@ -697,6 +787,18 @@ export class AgentManager extends EventEmitter {
     const agent = this.agents.get(agentId)
     if (!agent?.client) throw new Error('Agent not connected')
     return agent.client.send({ type: 'send_message', targetActiveSessionId: target, message, deliveryMode: mode })
+  }
+
+  async getSubagentTree(agentId: string): Promise<import('@shared/types').SubagentNode[]> {
+    const agent = this.agents.get(agentId)
+    if (!agent?.client) return []
+    return agent.client.getSubagentTree()
+  }
+
+  async getSubagentMessages(agentId: string, activeSessionId: string): Promise<unknown[]> {
+    const agent = this.agents.get(agentId)
+    if (!agent?.client) return []
+    return agent.client.getSubagentMessages(activeSessionId)
   }
 
   // ---------- Checkpoints (Approval & Rollback) ----------
@@ -827,29 +929,41 @@ export class AgentManager extends EventEmitter {
 
   // ---------- Autonomy ----------
 
-  private autonomyConfigs = new Map<string, AutonomousConfig>()
-  private autonomyProgresses = new Map<string, AutonomousProgress>()
-
-  private defaultAutonomyConfig(): AutonomousConfig {
-    return { enabled: false, gates: [], gateRetries: 3, maxContinuations: 3, maxTurns: 12, maxTokens: 80000, maxSeconds: 1800 }
-  }
-
-  private defaultAutonomyProgress(): AutonomousProgress {
-    return { turns: 0, maxTurns: 12, tokens: 0, maxTokens: 80000, seconds: 0, maxSeconds: 1800, continuations: 0, maxContinuations: 3, active: false, gates: [] }
-  }
-
-  getAutonomy(agentId: string | null): { config: AutonomousConfig; progress: AutonomousProgress } {
-    const id = agentId ?? '__global__'
+  async getAutonomy(agentId: string | null): Promise<{ config: AutonomousConfig; progress: AutonomousProgress; goal: unknown }> {
+    const config = { ...(await getState()).settings.autonomous }
+    const agent = agentId ? this.agents.get(agentId) : undefined
+    const state = agent?.client?.running
+      ? await agent.client.withConnection((connection) => connection.getState()).catch(() => null)
+      : null
+    const goal = state?.goal ?? null
     return {
-      config: { ...(this.autonomyConfigs.get(id) ?? this.defaultAutonomyConfig()) },
-      progress: { ...(this.autonomyProgresses.get(id) ?? this.defaultAutonomyProgress()) }
+      config,
+      goal,
+      progress: {
+        turns: 0,
+        maxTurns: config.maxTurns,
+        tokens: Number((goal as Record<string, unknown> | null)?.tokensUsed ?? 0),
+        maxTokens: config.maxTokens,
+        seconds: Number((goal as Record<string, unknown> | null)?.timeUsedSeconds ?? 0),
+        maxSeconds: config.maxSeconds,
+        continuations: Number((goal as Record<string, unknown> | null)?.continuationsUsed ?? 0),
+        maxContinuations: config.maxContinuations,
+        active: Boolean((goal as Record<string, unknown> | null)?.active),
+        gates: config.gates.map((command) => ({ command, lastResult: null, attempts: 0 }))
+      }
     }
   }
 
-  setAutonomy(agentId: string | null, patch: Partial<AutonomousConfig>): { config: AutonomousConfig; progress: AutonomousProgress } {
-    const id = agentId ?? '__global__'
-    const current = this.autonomyConfigs.get(id) ?? this.defaultAutonomyConfig()
-    this.autonomyConfigs.set(id, { ...current, ...patch })
+  async setAutonomy(agentId: string | null, patch: Partial<AutonomousConfig>): Promise<{ config: AutonomousConfig; progress: AutonomousProgress; goal: unknown }> {
+    const current = (await getState()).settings.autonomous
+    const config = { ...current, ...patch }
+    await setSettings({ autonomous: config })
+    const agent = agentId ? this.agents.get(agentId) : undefined
+    if (patch.enabled !== undefined && agent?.client?.running) {
+      await agent.client.withConnection((connection) =>
+        connection.prompt(`/autonomous ${patch.enabled ? 'on' : 'off'}`)
+      ).catch(() => {})
+    }
     return this.getAutonomy(agentId)
   }
 
@@ -917,6 +1031,40 @@ export class AgentManager extends EventEmitter {
     const agent = this.agents.get(agentId)
     if (!agent) return []
     if (agent.skills.length === 0) {
+      if (agent.client?.running) {
+        try {
+          const snapshot = await agent.client.withConnection((connection) => connection.getResourceSnapshot())
+          const resources: SkillInfo[] = [
+            ...((snapshot.skills as Record<string, unknown>[] | undefined) ?? []).map((item) => ({
+              name: String(item.name ?? ''),
+              description: String(item.description ?? ''),
+              source: 'skill' as const,
+              location: String((item.sourceInfo as Record<string, unknown> | undefined)?.scope ?? ''),
+              path: String(item.filePath ?? '')
+            })),
+            ...((snapshot.prompts as Record<string, unknown>[] | undefined) ?? []).map((item) => ({
+              name: String(item.name ?? ''),
+              description: String(item.description ?? ''),
+              source: 'prompt' as const,
+              location: String((item.sourceInfo as Record<string, unknown> | undefined)?.scope ?? ''),
+              path: String(item.filePath ?? '')
+            })),
+            ...((snapshot.extensions as Record<string, unknown>[] | undefined) ?? []).map((item) => ({
+              name: String(item.path ?? '').split('/').pop() ?? 'extension',
+              description: 'Prime Agent extension',
+              source: 'extension' as const,
+              location: String((item.sourceInfo as Record<string, unknown> | undefined)?.scope ?? ''),
+              path: String(item.path ?? '')
+            }))
+          ]
+          if (resources.length > 0) {
+            agent.skills = resources
+            return resources
+          }
+        } catch {
+          /* fall back to slash-command metadata */
+        }
+      }
       const cmds = (await this.getCommands(agentId)) as { name: string; description?: string; source?: string; location?: string; path?: string }[]
       agent.skills = cmds
         .filter((c) => c.source === 'skill' || c.source === 'prompt')
@@ -993,27 +1141,189 @@ export class AgentManager extends EventEmitter {
       return { enabled: await getAgentTracesEnabled() }
     }
     if (action === 'update') {
+      const connected = [...this.agents.values()]
+      if (connected.some((item) => item.info.isStreaming || item.info.status === 'working')) {
+        throw new Error('Wait for running agents to become idle before updating Prime Agent.')
+      }
       const { execFile } = await import('child_process')
       const { promisify } = await import('util')
-      const result = await promisify(execFile)(this.binary.getBinary(), ['update'], {
-        timeout: 10 * 60_000,
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, ELECTRON_NO_ASAR: undefined }
-      })
-      return { output: `${result.stdout}\n${result.stderr}`.trim() }
+      const settings = (await getState()).settings
+      for (const item of connected) {
+        item.client?.kill()
+        item.client = null
+        item.info.status = 'starting'
+        this.publish(item)
+      }
+      try {
+        await this.runPrimeCommand(['shutdown', '--force', '--json'])
+        const result = await promisify(execFile)(this.binary.getBinary(), ['update'], {
+          timeout: 10 * 60_000,
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, ELECTRON_NO_ASAR: undefined }
+        })
+        await this.binary.check()
+        return { output: `${result.stdout}\n${result.stderr}`.trim() }
+      } finally {
+        for (const item of connected) {
+          await this.connect(item, settings).catch((error) => {
+            item.info.status = 'error'
+            this.toast(item, 'error', error instanceof Error ? error.message : String(error))
+            this.publish(item)
+          })
+        }
+      }
+    }
+    if (action === 'daemon_status' || action === 'daemon_doctor' || action === 'daemon_recover' || action === 'daemon_shutdown') {
+      const args = action === 'daemon_status'
+        ? ['status', '--json']
+        : action === 'daemon_shutdown'
+          ? ['shutdown', '--force', '--json']
+          : ['doctor', ...(action === 'daemon_recover' ? ['--fix'] : []), '--json']
+      const result = await this.runPrimeCommand(args)
+      if (action === 'daemon_recover') {
+        const settings = (await getState()).settings
+        for (const item of this.agents.values()) {
+          if (item.client?.running && item.info.status !== 'error' && item.info.status !== 'stopped') continue
+          item.client?.kill()
+          item.client = null
+          item.info.status = 'starting'
+          this.publish(item)
+          await this.connect(item, settings).catch((error) => {
+            item.info.status = 'error'
+            this.toast(item, 'error', error instanceof Error ? error.message : String(error))
+            this.publish(item)
+          })
+        }
+      }
+      return result
+    }
+    if (action === 'package') {
+      const command = String(input.command ?? 'list')
+      if (!['list', 'install', 'remove', 'update'].includes(command)) throw new Error('Unsupported package action')
+      const source = String(input.source ?? '').trim()
+      if ((command === 'install' || command === 'remove') && !source) throw new Error('Package source is required')
+      const result = await this.runPrimeCommand(['package', command, ...(source ? [source] : [])], agentId)
+      if (result.ok) {
+        for (const running of this.agents.values()) {
+          running.skills = []
+          if (running.client?.running) void running.client.send({ type: 'reload' }).catch(() => {})
+        }
+      }
+      return result
+    }
+    if (action === 'mcp_get') return { servers: await getMcpServers() }
+    if (action === 'mcp_set') {
+      const config = input.remove === true
+        ? null
+        : {
+            url: String(input.url ?? ''),
+            oauth: input.oauth !== false,
+            enabled: input.enabled !== false,
+            bearerTokenEnvVar: typeof input.bearerTokenEnvVar === 'string' ? input.bearerTokenEnvVar : undefined
+          }
+      return { servers: await setMcpServer(String(input.name ?? ''), config) }
+    }
+    if (action === 'trace_list') {
+      const files = existsSync(SESSION_DIR)
+        ? await Promise.all((await readdir(SESSION_DIR))
+            .filter((name) => name.endsWith('.jsonl'))
+            .map(async (name) => {
+              const path = join(SESSION_DIR, name)
+              const info = await stat(path)
+              return { path, name, size: info.size, modifiedAt: info.mtimeMs }
+            }))
+        : []
+      return { files: files.sort((left, right) => right.modifiedAt - left.modifiedAt).slice(0, 200) }
+    }
+    if (action === 'trace_preview') {
+      const path = resolve(String(input.path ?? ''))
+      const root = `${resolve(SESSION_DIR)}/`
+      if (!path.startsWith(root) || !path.endsWith('.jsonl')) throw new Error('Trace path is outside the session directory')
+      const contents = await readFile(path, 'utf8')
+      return {
+        path,
+        size: Buffer.byteLength(contents),
+        preview: contents.slice(0, 200_000),
+        truncated: contents.length > 200_000
+      }
     }
     const agent = this.agents.get(agentId)
     if (!agent?.client?.running) throw new Error('Unknown or disconnected agent')
     return agent.client.withConnection(
       async (connection) => {
         switch (action) {
+          case 'capabilities':
+            return {
+              queueMutation: typeof connection.mutateQueuedMessage === 'function',
+              sessionTree: typeof connection.getSessionTree === 'function',
+              sideQuestions: typeof connection.startSideQuestion === 'function',
+              childCancellation: typeof connection.cancelRlmChild === 'function',
+              resources: typeof connection.getResourceSnapshot === 'function',
+              modelCatalog: typeof connection.getModelCatalog === 'function',
+              jsonlExport: typeof connection.exportToJsonl === 'function'
+            }
+          case 'queue':
+            return {
+              ...(await connection.getQueue()),
+              mutationSupported: typeof connection.mutateQueuedMessage === 'function'
+            }
+          case 'queue_mutate': {
+            if (!connection.mutateQueuedMessage) return { status: 'unsupported', ...(await connection.getQueue()) }
+            const lane = input.lane === 'followUp' ? 'followUp' : 'steering'
+            const index = Math.max(0, Math.floor(Number(input.index)))
+            const expectedText = String(input.expectedText ?? '')
+            const raw = (input.mutation ?? {}) as Record<string, unknown>
+            const mutation = raw.type === 'move'
+              ? { type: 'move' as const, direction: raw.direction === -1 ? -1 as const : 1 as const }
+              : raw.type === 'replace'
+                ? {
+                    type: 'replace' as const,
+                    text: String(raw.text ?? ''),
+                    lane: raw.lane === 'followUp' ? 'followUp' as const : 'steering' as const
+                  }
+                : { type: 'delete' as const }
+            const status = await connection.mutateQueuedMessage(lane, index, expectedText, mutation)
+            return { status, ...(await connection.getQueue()), mutationSupported: true }
+          }
+          case 'queue_clear':
+            return connection.clearQueue()
+          case 'queue_abort_clear':
+            return connection.abortAndClearQueue()
           case 'get_tree': {
             const { tree, leafId } = await connection.getSessionTree()
             return { nodes: flattenTree(tree), leafId }
           }
+          case 'get_tree_full':
+            return connection.getSessionTree()
           case 'navigate_tree':
-            return connection.navigateTree(String(input.targetId ?? ''))
+            return connection.navigateTree(String(input.targetId ?? ''), {
+              summarize: input.summarize !== false,
+              customInstructions: typeof input.instructions === 'string' ? input.instructions : undefined,
+              label: typeof input.label === 'string' ? input.label : undefined
+            })
+          case 'label_tree':
+            await connection.setSessionEntryLabel(String(input.entryId ?? ''), typeof input.label === 'string' ? input.label : undefined)
+            return connection.getSessionTree()
+          case 'family': {
+            const snapshot = await connection.getInitialSnapshot()
+            return { children: snapshot.children ?? [] }
+          }
+          case 'family_cancel':
+            return { cancelled: await connection.cancelRlmChild(String(input.childId ?? '')) }
           case 'system_prompt':
             return { text: await connection.getSystemPrompt() }
+          case 'side_question_start': {
+            const id = String(input.id ?? `desktop-side-${Date.now()}`)
+            const previousTurns = Array.isArray(input.previousTurns)
+              ? input.previousTurns.map((turn) => {
+                  const item = turn as Record<string, unknown>
+                  return { question: String(item.question ?? ''), answer: String(item.answer ?? '') }
+                })
+              : undefined
+            await connection.startSideQuestion(id, String(input.question ?? ''), previousTurns)
+            return { id, started: true }
+          }
+          case 'side_question_abort':
+            return { aborted: await connection.abortSideQuestion(String(input.id ?? '')) }
           case 'side_question': {
             const id = `desktop-side-${Date.now()}`
             const result = new Promise<{ answer: string }>((resolve, reject) => {
@@ -1050,6 +1360,63 @@ export class AgentManager extends EventEmitter {
                 : []
             )
             return { saved: true }
+          case 'resources':
+            return connection.getResourceSnapshot()
+          case 'model_catalog':
+            return connection.getModelCatalog()
+          case 'set_transport':
+            await connection.setTransport(
+              ['sse', 'websocket', 'websocket-cached'].includes(String(input.transport))
+                ? String(input.transport) as 'sse' | 'websocket' | 'websocket-cached'
+                : 'auto'
+            )
+            return { transport: String(input.transport ?? 'auto') }
+          case 'goal_state':
+            return { goal: (await connection.getState()).goal }
+          case 'goal_command':
+            await connection.prompt(String(input.command ?? '/goal status'))
+            return { accepted: true }
+          case 'autonomous_command':
+            await connection.prompt(`/autonomous ${String(input.mode ?? 'status')}`)
+            return { accepted: true }
+          case 'heartbeats':
+            return { heartbeats: await connection.listHeartbeats() }
+          case 'heartbeat_manage':
+            return connection.manageHeartbeat(
+              String(input.activeSessionId ?? ''),
+              String(input.jobId ?? ''),
+              ['pause', 'resume'].includes(String(input.action))
+                ? String(input.action) as 'pause' | 'resume'
+                : 'stop'
+            )
+          case 'heartbeat_set':
+            return connection.setHeartbeat(
+              String(input.schedule ?? ''),
+              String(input.prompt ?? ''),
+              input.deliveryMode === 'follow_up' ? 'follow_up' : 'steer'
+            )
+          case 'refine':
+            return connection.refine({
+              instructions: typeof input.instructions === 'string' ? input.instructions : undefined,
+              rollbackId: typeof input.rollbackId === 'string' ? input.rollbackId : undefined,
+              global: input.global === true
+            })
+          case 'refinement_history': {
+            const { tree } = await connection.getSessionTree()
+            const history: unknown[] = []
+            const visit = (nodes: DaemonTreeNode[]) => {
+              for (const node of nodes) {
+                if (node.entry.type === 'custom' && node.entry.customType === 'prime-agent.refinement' && node.entry.data) {
+                  history.push(node.entry.data)
+                }
+                visit(node.children)
+              }
+            }
+            visit(tree)
+            return { history }
+          }
+          case 'export_jsonl':
+            return { path: await connection.exportToJsonl(typeof input.outputPath === 'string' ? input.outputPath : undefined) }
           case 'reload':
             await connection.reload()
             return { reloaded: true }
@@ -1060,6 +1427,32 @@ export class AgentManager extends EventEmitter {
         }
       }
     )
+  }
+
+  private async runPrimeCommand(args: string[], agentId?: string): Promise<{ ok: boolean; output: string; data?: unknown }> {
+    const { execFile } = await import('child_process')
+    const { promisify } = await import('util')
+    const agent = agentId ? this.agents.get(agentId) : undefined
+    try {
+      const result = await promisify(execFile)(this.binary.getBinary(), args, {
+        cwd: agent?.path ?? homedir(),
+        timeout: 10 * 60_000,
+        maxBuffer: 10 * 1024 * 1024,
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, ELECTRON_NO_ASAR: undefined }
+      })
+      const output = `${result.stdout}\n${result.stderr}`.trim()
+      try {
+        return { ok: true, output, data: JSON.parse(output) }
+      } catch {
+        return { ok: true, output }
+      }
+    } catch (error) {
+      const detail = error as Error & { stdout?: string; stderr?: string }
+      return {
+        ok: false,
+        output: `${detail.stdout ?? ''}\n${detail.stderr ?? ''}\n${detail.message}`.trim()
+      }
+    }
   }
 
   async exportHtml(agentId: string, outputPath?: string): Promise<string> {

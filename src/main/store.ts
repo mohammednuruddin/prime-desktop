@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from 'fs/promises'
+import { readFile, writeFile, mkdir, rename } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 import { existsSync } from 'fs'
@@ -10,6 +10,7 @@ export interface StoredState {
   tabs: ProjectTab[]
   activeTabId: string | null
   model: string | null
+  pinnedSessionFiles: string[]
 }
 
 const STATE_FILE = join(homedir(), 'Library', 'Application Support', 'PrimeDesktop', 'state.json')
@@ -23,6 +24,16 @@ const DEFAULTS: AppSettings = {
   autoRetry: true,
   model: null,
   rlmMaxDepth: 1,
+  transport: 'auto',
+  autonomous: {
+    enabled: false,
+    gates: [],
+    gateRetries: 2,
+    maxContinuations: 8,
+    maxTurns: 30,
+    maxTokens: 100000,
+    maxSeconds: 3600
+  },
   themeMode: 'system',
   codeThemeId: 'codex',
   lightTheme: PRIME_LIGHT_THEME,
@@ -30,6 +41,7 @@ const DEFAULTS: AppSettings = {
 }
 
 let cache: StoredState | null = null
+let saveTail: Promise<void> = Promise.resolve()
 
 async function load(): Promise<StoredState> {
   if (cache) return cache
@@ -40,21 +52,29 @@ async function load(): Promise<StoredState> {
         settings: { ...DEFAULTS, ...(raw.settings ?? {}) },
         tabs: raw.tabs ?? [],
         activeTabId: raw.activeTabId ?? null,
-        model: raw.model ?? null
+        model: raw.model ?? null,
+        pinnedSessionFiles: raw.pinnedSessionFiles ?? []
       }
     } else {
-      cache = { settings: { ...DEFAULTS }, tabs: [], activeTabId: null, model: null }
+      cache = { settings: { ...DEFAULTS }, tabs: [], activeTabId: null, model: null, pinnedSessionFiles: [] }
     }
   } catch {
-    cache = { settings: { ...DEFAULTS }, tabs: [], activeTabId: null, model: null }
+    cache = { settings: { ...DEFAULTS }, tabs: [], activeTabId: null, model: null, pinnedSessionFiles: [] }
   }
   return cache
 }
 
 async function save(): Promise<void> {
   if (!cache) return
-  await mkdir(join(STATE_FILE, '..'), { recursive: true })
-  await writeFile(STATE_FILE, JSON.stringify(cache, null, 2))
+  const contents = JSON.stringify(cache, null, 2)
+  const tempFile = `${STATE_FILE}.${process.pid}.tmp`
+  const write = saveTail.catch(() => {}).then(async () => {
+    await mkdir(join(STATE_FILE, '..'), { recursive: true })
+    await writeFile(tempFile, contents)
+    await rename(tempFile, STATE_FILE)
+  })
+  saveTail = write.catch(() => {})
+  await write
 }
 
 export async function getState(): Promise<StoredState> {
@@ -79,4 +99,14 @@ export async function setModel(model: string | null): Promise<void> {
   const s = await load()
   s.model = model
   await save()
+}
+
+export async function setSessionPinned(sessionFile: string, pinned: boolean): Promise<string[]> {
+  const s = await load()
+  const next = new Set(s.pinnedSessionFiles)
+  if (pinned) next.add(sessionFile)
+  else next.delete(sessionFile)
+  s.pinnedSessionFiles = [...next]
+  await save()
+  return s.pinnedSessionFiles
 }

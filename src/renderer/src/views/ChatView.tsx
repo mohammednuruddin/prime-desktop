@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AgentInfo, ProjectTab, ViewId } from '@shared/types'
+import type { AgentInfo, GoalState, ProjectTab, SubagentNode, ViewId } from '@shared/types'
 import type { GitStatus } from '@shared/types'
 import { parseModelList, type ModelOption } from '@shared/models'
 import { dispatchSlash, type SlashOverlayId } from '@shared/slash'
 import Composer from '../components/Composer'
 import CloudMark from '../components/CloudMark'
 import MessageItem from '../components/MessageItem'
+import SubagentMark from '../components/SubagentMark'
 import SlashOverlay from '../components/SlashOverlay'
+import HarnessTray from '../components/HarnessTray'
 import type { Block, FleetEntry, RenderMessage } from '../lib/store'
 import { mergeMessage as merge, extractText } from '../lib/store'
 import type { AccessMode } from '../components/AccessPicker'
@@ -31,24 +33,29 @@ interface Props {
   onOpenGit?: () => void
   onSelectProject?: (projectId: string) => void
   onNewProject?: () => void
+  subagents?: SubagentNode[]
+  onOpenSubagents?: () => void
+  showSubagentCard?: boolean
   onToast?: (text: string, kind?: 'info' | 'success' | 'warning' | 'error') => void
   rlmMaxDepth?: number
   onDepthChange?: (depth: number) => void
 }
 
-export default function ChatView({ agentId, info, tab: _tab, projects = [], accessMode = 'ask', onAccessModeChange, onOpenSubagent, onSubagentActivity, onNavigate, onOpenGit, onSelectProject, onNewProject, onToast, rlmMaxDepth = 1, onDepthChange }: Props): JSX.Element {
+export default function ChatView({ agentId, info, tab: _tab, projects = [], accessMode = 'ask', onAccessModeChange, onOpenSubagent, onSubagentActivity, onNavigate, onOpenGit, onSelectProject, onNewProject, subagents = [], onOpenSubagents, showSubagentCard = true, onToast, rlmMaxDepth = 1, onDepthChange }: Props): JSX.Element {
   const [messages, setMessages] = useState<RenderMessage[]>([])
   const [toolExecs, setToolExecs] = useState<Record<string, unknown>>({})
   const [commands, setCommands] = useState<{ name: string; description?: string }[]>([])
   const [models, setModels] = useState<ModelOption[]>([])
   const [branch, setBranch] = useState<string | null>(null)
   const [showJumpToLatest, setShowJumpToLatest] = useState(false)
+  const [awaitingResponse, setAwaitingResponse] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const followLatestRef = useRef(true)
 
   useEffect(() => {
     followLatestRef.current = true
     setShowJumpToLatest(false)
+    setAwaitingResponse(false)
     setMessages([])
     setToolExecs({})
     void window.prime.agentMessages(agentId).then((msgs) => {
@@ -109,6 +116,9 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
             break
           }
           const ev = p.assistantMessageEvent as Record<string, unknown> | undefined
+          if (ev?.type === 'text_delta' || ev?.type === 'thinking_delta' || ev?.type === 'toolcall_delta') {
+            setAwaitingResponse(false)
+          }
           setMessages((prev) => {
             const next = merge(prev, msg)
             const idx = next.findIndex((m) => m.id === msg.id)
@@ -125,6 +135,7 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
         case 'message_start':
         case 'message_end': {
           const msg = p.message as Record<string, unknown> | undefined
+          if (e.type === 'message_end' && msg?.role === 'assistant') setAwaitingResponse(false)
           if (msg && isInternalStateRestoreMessage(msg)) {
             setMessages((prev) => prev.filter((message) => message.id !== msg.id))
           } else if (msg) {
@@ -136,6 +147,7 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
           if (p.display === false) break
           if (isInternalStateRestoreMessage(p)) break
           if (p.customType === 'agent_message') {
+            setAwaitingResponse(false)
             setMessages((prev) => merge(prev, { ...p, role: 'assistant' }))
           } else if (
             p.customType === 'session_slash_command' ||
@@ -161,9 +173,11 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
         case 'session_started': {
           setMessages([])
           setToolExecs({})
+          setAwaitingResponse(false)
           break
         }
         case 'turn_end': {
+          setAwaitingResponse(false)
           const msg = p.message as Record<string, unknown> | undefined
           const results = p.toolResults as Record<string, unknown>[] | undefined
           setMessages((prev) => {
@@ -263,14 +277,23 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
 
   const handleSend = useCallback(
     (text: string, images: { type: 'image'; data: string; mimeType: string }[]) => {
+      if (!busy) {
+        followLatestRef.current = true
+        setShowJumpToLatest(false)
+        setAwaitingResponse(true)
+      }
       void window.prime.agentCommand(agentId, {
         type: 'prompt',
         message: text,
         images: images.length ? images : undefined,
         streamingBehavior: busy ? 'steer' : undefined
-      } as never).catch((err) => console.error('send failed', err))
+      } as never).catch((err) => {
+        setAwaitingResponse(false)
+        console.error('send failed', err)
+        onToast?.(err instanceof Error ? err.message : String(err), 'error')
+      })
     },
-    [agentId, busy]
+    [agentId, busy, onToast]
   )
 
   const handleAbort = useCallback(
@@ -303,6 +326,20 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
   const [effortLevel, setEffortLevel] = useState<string>('High')
   const [overlay, setOverlay] = useState<{ id: SlashOverlayId; args: string } | null>(null)
   const [openPicker, setOpenPicker] = useState<'models' | 'effort' | 'depth' | null>(null)
+  const [goal, setGoal] = useState<GoalState | null>(null)
+
+  useEffect(() => {
+    setGoal(null)
+    void window.prime.agentHarness(agentId, 'goal_state').then((result) => {
+      setGoal((result as { goal?: GoalState | null }).goal ?? null)
+    }).catch(() => {})
+    const off = window.prime.onEvent((raw) => {
+      const event = raw as { agentId?: string; type?: string; payload?: Record<string, unknown> }
+      if (event.agentId !== agentId || event.type !== 'goal_update') return
+      setGoal((event.payload?.goal ?? event.payload) as GoalState | null)
+    })
+    return off
+  }, [agentId])
 
   const note = useCallback((text: string) => {
     setMessages((prev) => [...prev, { id: `cmd-${Date.now()}`, role: 'system', content: text }])
@@ -477,7 +514,7 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
     <div className="codex-chat-layout">
       {/* Main Messages Area */}
       <div className="codex-messages-area" ref={scrollRef} onScroll={handleMessagesScroll}>
-        {messages.length === 0 ? (
+        {messages.length === 0 && !awaitingResponse ? (
           <div className="codex-welcome-center">
             {/* Cloud Icon with Code face */}
             <div className="codex-cloud-icon">
@@ -533,9 +570,18 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
             {messages.map((m, i) => (
               <MessageItem key={m.id ?? i} message={m} toolExecs={toolExecs as never} onOpenSubagent={onOpenSubagent} />
             ))}
+            {awaitingResponse && (
+              <div className="assistant-pending" role="status" aria-live="polite">
+                <span className="assistant-pending-shimmer">Thinking…</span>
+              </div>
+            )}
           </div>
         )}
       </div>
+
+      {showSubagentCard && subagents.length > 0 && onOpenSubagents && (
+        <SubagentActivityCard tree={subagents} onOpen={onOpenSubagents} />
+      )}
 
       {showJumpToLatest && (
         <button
@@ -552,6 +598,8 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
       )}
 
       {/* Floating Bottom Composer */}
+      <ExtensionSurface info={info} placement="aboveEditor" />
+      <HarnessTray agentId={agentId} busy={busy} onToast={onToast} />
       <Composer
         busy={busy}
         commands={commands}
@@ -577,7 +625,23 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
         onSelectProject={onSelectProject}
         onNewProject={onNewProject}
         onBranchClick={onOpenGit}
+        externalText={info?.extensionUi?.editorText}
+        banner={goal?.objective && goal.status !== 'idle' ? (
+          <button
+            className={`goal-chip ${goal.status}`}
+            type="button"
+            onClick={() => setOverlay({ id: 'goal', args: '' })}
+          >
+            <span className="goal-chip-mark" aria-hidden="true" />
+            <span className="goal-chip-status">{goal.status === 'budget_limited' ? 'Budget paused' : goal.status}</span>
+            <span className="goal-chip-text">{goal.objective}</span>
+            {goal.tokenBudget ? (
+              <span className="goal-chip-usage">{Math.round((goal.tokensUsed / goal.tokenBudget) * 100)}%</span>
+            ) : null}
+          </button>
+        ) : undefined}
       />
+      <ExtensionSurface info={info} placement="belowEditor" />
       {overlay && (
         <SlashOverlay
           overlay={overlay.id}
@@ -629,6 +693,46 @@ export default function ChatView({ agentId, info, tab: _tab, projects = [], acce
       )}
     </div>
   )
+}
+
+function ExtensionSurface({ info, placement }: { info: AgentInfo | null; placement: 'aboveEditor' | 'belowEditor' }): JSX.Element | null {
+  const ui = info?.extensionUi
+  if (!ui) return null
+  const widgets = Object.entries(ui.widgets).filter(([, widget]) => widget.placement === placement)
+  const statuses = placement === 'belowEditor' ? Object.entries(ui.statuses) : []
+  if (widgets.length === 0 && statuses.length === 0) return null
+  return (
+    <div className={`extension-surface ${placement}`}>
+      {widgets.map(([key, widget]) => (
+        <div className="extension-widget" key={key}>
+          {widget.lines.map((line, index) => <div key={index}>{line}</div>)}
+        </div>
+      ))}
+      {statuses.map(([key, text]) => <span className="extension-status" key={key}>{key}: {text}</span>)}
+    </div>
+  )
+}
+
+function SubagentActivityCard({ tree, onOpen }: { tree: SubagentNode[]; onOpen: () => void }): JSX.Element {
+  const all = flattenSubagents(tree)
+  const working = all.filter((agent) => agent.status === 'working')
+  const visible = working.length > 0 ? working : all
+  return (
+    <button className="agent-activity-card" type="button" onClick={onOpen} aria-label="Open subagent activity">
+      <span className="agent-activity-label">Subagents</span>
+      <span className="agent-activity-summary">
+        <span className="agent-activity-marks" aria-hidden="true">
+          {visible.slice(0, 3).map((agent) => <SubagentMark key={agent.id} seed={agent.id} />)}
+        </span>
+        <span>{working.length > 0 ? `${working.length} working` : `${all.length} ${all.length === 1 ? 'agent' : 'agents'}`}</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+      </span>
+    </button>
+  )
+}
+
+function flattenSubagents(tree: SubagentNode[]): SubagentNode[] {
+  return tree.flatMap((node) => [node, ...flattenSubagents(node.children)])
 }
 
 function activityFromBlock(block: Block): FleetEntry | null {

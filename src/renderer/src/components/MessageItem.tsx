@@ -456,22 +456,40 @@ function EditedFilesGroup({ items, openTools, onToggle }: {
 
 /* ─── User bubble with collapse ──────────────────────── */
 
-function UserBubble({ text, isLong }: { text: string; isLong: boolean }): JSX.Element {
+function UserBubble({ text, isLong, timestamp }: { text: string; isLong: boolean; timestamp?: string | null }): JSX.Element {
   const [expanded, setExpanded] = useState(!isLong)
+  const [copied, setCopied] = useState(false)
   const preview = isLong ? text.slice(0, USER_COLLAPSE_THRESHOLD) + '…' : text
+
+  const copyMessage = () => {
+    void navigator.clipboard.writeText(text)
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1500)
+  }
 
   return (
     <div className="msg user">
-      <div className={`msg-bubble user ${isLong && !expanded ? 'msg-bubble-collapsed' : ''}`}>
-        {expanded ? text : preview}
-        {isLong && !expanded && (
-          <div className="msg-bubble-overflow">
-            <button className="msg-expand-btn" onClick={() => setExpanded(true)}>Show more</button>
-          </div>
-        )}
-        {isLong && expanded && (
-          <div className="msg-bubble-overflow">
-            <button className="msg-expand-btn" onClick={() => setExpanded(false)}>Show less</button>
+      <div className="msg-user-stack">
+        <div className={`msg-bubble user ${isLong && !expanded ? 'msg-bubble-collapsed' : ''}`}>
+          {expanded ? text : preview}
+          {isLong && !expanded && (
+            <div className="msg-bubble-overflow">
+              <button className="msg-expand-btn" onClick={() => setExpanded(true)}>Show more</button>
+            </div>
+          )}
+          {isLong && expanded && (
+            <div className="msg-bubble-overflow">
+              <button className="msg-expand-btn" onClick={() => setExpanded(false)}>Show less</button>
+            </div>
+          )}
+        </div>
+        {text && (
+          <div className="turn-footer turn-footer-user">
+            <button className="turn-footer-btn" onClick={copyMessage} title="Copy message">
+              <CopyIcon />
+              {copied && <span className="turn-footer-copied">Copied!</span>}
+            </button>
+            {timestamp && <span className="turn-footer-time">{timestamp}</span>}
           </div>
         )}
       </div>
@@ -482,7 +500,6 @@ function UserBubble({ text, isLong }: { text: string; isLong: boolean }): JSX.El
 /* ─── Main MessageItem ────────────────────────────────── */
 
 export default function MessageItem({ message, toolExecs, onOpenSubagent }: Props): JSX.Element {
-  const [showThinking, setShowThinking] = useState(false)
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({})
   const [copied, setCopied] = useState(false)
 
@@ -495,7 +512,10 @@ export default function MessageItem({ message, toolExecs, onOpenSubagent }: Prop
         ? message.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
         : ''
     const isLong = text.length > USER_COLLAPSE_THRESHOLD
-    return <UserBubble text={text} isLong={isLong} />
+    const timestamp = message.timestamp
+      ? new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : null
+    return <UserBubble text={text} isLong={isLong} timestamp={timestamp} />
   }
 
   if (message.role === 'system') {
@@ -520,7 +540,6 @@ export default function MessageItem({ message, toolExecs, onOpenSubagent }: Prop
   }
 
   const blocks = Array.isArray(message.content) ? message.content : [{ type: 'text', text: message.content }] as Block[]
-  const hasThinking = blocks.some((b) => b.type === 'thinking')
 
   const toolInfos = useMemo(() => {
     return blocks
@@ -590,14 +609,6 @@ export default function MessageItem({ message, toolExecs, onOpenSubagent }: Prop
 
   return (
     <div className="msg assistant">
-      {hasThinking && (
-        <div className="msg-head-thinking">
-          <button className="thinking-toggle" onClick={() => setShowThinking((v) => !v)}>
-            {message.streaming ? 'Thinking' : 'Thought'}
-          </button>
-        </div>
-      )}
-
       {renderGroups.map((group, i) => {
         if (group.type === 'text' && group.block) {
           return (
@@ -609,11 +620,12 @@ export default function MessageItem({ message, toolExecs, onOpenSubagent }: Prop
         }
 
         if (group.type === 'thinking' && group.block) {
-          if (!showThinking) return <span key={i} className="thinking-hidden" />
           return (
-            <details key={i} className="thinking-block" open>
-              <summary>Thought</summary>
-              <pre className="thinking-pre">{group.block.thinking}</pre>
+            <details key={i} className="thinking-block" open={message.streaming || undefined}>
+              <summary>{message.streaming ? 'Thinking' : 'Thought'}</summary>
+              <div className="thinking-content">
+                <Markdown text={group.block.thinking ?? ''} />
+              </div>
             </details>
           )
         }
@@ -688,7 +700,7 @@ function renderInline(text: string): (JSX.Element | string)[] {
 
 /* ─── Markdown renderer — token-based, handles blank lines inside code fences ── */
 
-function Markdown({ text }: { text: string }): JSX.Element {
+export function Markdown({ text }: { text: string }): JSX.Element {
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null)
 
   type Token =

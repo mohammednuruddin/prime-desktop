@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import type { AuthProvider, SessionSummary } from '@shared/types'
+import type { AuthProvider, GoalState, SessionSummary } from '@shared/types'
 import type { ModelOption } from '@shared/models'
 import type { SlashOverlayId } from '@shared/slash'
 import { HOTKEYS } from '@shared/slash'
@@ -105,6 +105,8 @@ function OverlayBody(props: Props): JSX.Element {
           onClose={props.onClose}
         />
       )
+    case 'goal':
+      return <GoalPane agentId={props.agentId} args={props.args} onClose={props.onClose} />
   }
 }
 
@@ -404,6 +406,179 @@ function SystemPromptPane({ agentId, onClose }: { agentId: string; onClose: () =
       <pre className="slash-pre">{text}</pre>
     </SimplePane>
   )
+}
+
+function GoalPane({ agentId, args, onClose }: { agentId: string; args: string; onClose: () => void }): JSX.Element {
+  const parsed = parseGoalDraft(args)
+  const [goal, setGoal] = useState<GoalState | null>(null)
+  const [objective, setObjective] = useState(parsed.objective)
+  const [budget, setBudget] = useState(parsed.budget)
+  const [editing, setEditing] = useState(Boolean(parsed.objective))
+  const [loaded, setLoaded] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const refresh = () => {
+    void window.prime.agentHarness(agentId, 'goal_state').then((result) => {
+      const next = (result as { goal?: GoalState | null }).goal ?? null
+      setGoal(next)
+      if (next?.objective && next.status !== 'idle' && !parsed.objective) {
+        setObjective(next.objective)
+        setBudget(next.tokenBudget ? String(next.tokenBudget) : '')
+        setEditing(false)
+      }
+      setLoaded(true)
+    }).catch((err: Error) => {
+      setError(err.message)
+      setLoaded(true)
+    })
+  }
+
+  useEffect(() => {
+    refresh()
+    const off = window.prime.onEvent((raw) => {
+      const event = raw as { agentId?: string; type?: string; payload?: Record<string, unknown> }
+      if (event.agentId === agentId && event.type === 'goal_update') {
+        setGoal((event.payload?.goal ?? event.payload) as GoalState | null)
+      }
+    })
+    return off
+  }, [agentId])
+
+  const live = goal?.objective && goal.status !== 'idle' ? goal : null
+  const composing = editing || !live
+
+  const run = async (command: string) => {
+    setBusy(true)
+    setError('')
+    try {
+      await window.prime.agentHarness(agentId, 'goal_command', { command })
+      window.setTimeout(refresh, 200)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const start = () => {
+    const text = objective.trim()
+    if (!text) return
+    const tokens = Number(budget)
+    const prefix = tokens > 0 ? `--budget ${tokens} ` : ''
+    void run(`/goal ${prefix}${text}`).then(() => setEditing(false))
+  }
+
+  return (
+    <div className="goal-sheet">
+      <header className="slash-head">
+        <div className="goal-kicker">
+          <span className="goal-mark" aria-hidden="true" />
+          <div>
+            <h3>Thread goal</h3>
+            <p>The daemon keeps this objective until you pause or clear it.</p>
+          </div>
+        </div>
+        <button className="slash-x" onClick={onClose} aria-label="Close">×</button>
+      </header>
+      <div className="slash-body">
+        {live && !composing && loaded && (
+          <div className={`goal-brief ${live.status}`}>
+            <div className="goal-brief-meta">
+              <span className={`goal-status ${live.status}`}>{goalStatusLabel(live.status)}</span>
+              <span>{formatGoalUsage(live)}</span>
+            </div>
+            <p>{live.objective}</p>
+            <div className="goal-meter" aria-hidden="true">
+              <i style={{ width: `${goalProgress(live)}%` }} />
+            </div>
+            {live.lastReason && <div className="slash-copy">{live.lastReason}</div>}
+            {live.lastError && <div className="theme-import-error">{live.lastError}</div>}
+            <div className="goal-actions">
+              {live.status === 'active' && <button className="btn small" disabled={busy} onClick={() => void run('/goal pause')}>Pause</button>}
+              {['paused', 'budget_limited'].includes(live.status) && <button className="btn small" disabled={busy} onClick={() => void run('/goal resume')}>Resume</button>}
+              <button className="btn ghost small" disabled={busy} onClick={() => setEditing(true)}>Rewrite</button>
+              <button className="btn ghost small" disabled={busy} onClick={() => void run('/goal clear').then(() => { setObjective(''); setBudget(''); setEditing(true) })}>Clear</button>
+            </div>
+          </div>
+        )}
+
+        {composing && (loaded || Boolean(parsed.objective)) && (
+          <form
+            className="goal-compose"
+            onSubmit={(event) => {
+              event.preventDefault()
+              start()
+            }}
+          >
+            <label className="goal-field">
+              <span>Keep working until</span>
+              <textarea
+                className="field"
+                autoFocus
+                rows={4}
+                value={objective}
+                placeholder="Ship the inspector redesign, then stop."
+                onChange={(event) => setObjective(event.target.value)}
+              />
+            </label>
+            <div className="goal-budget">
+              <span>Token budget</span>
+              <div className="goal-budget-chips">
+                {['', '20000', '50000', '100000'].map((value) => (
+                  <button
+                    key={value || 'none'}
+                    type="button"
+                    className={budget === value ? 'selected' : ''}
+                    onClick={() => setBudget(value)}
+                  >
+                    {value ? `${Number(value) / 1000}k` : 'None'}
+                  </button>
+                ))}
+                <input
+                  className="field"
+                  type="number"
+                  min="1"
+                  placeholder="Custom"
+                  value={['', '20000', '50000', '100000'].includes(budget) ? '' : budget}
+                  onChange={(event) => setBudget(event.target.value)}
+                />
+              </div>
+            </div>
+            <div className="goal-actions">
+              <button className="btn primary" type="submit" disabled={busy || !objective.trim()}>
+                {live ? 'Update goal' : 'Set goal'}
+              </button>
+              {live && <button className="btn ghost" type="button" onClick={() => setEditing(false)}>Cancel</button>}
+            </div>
+          </form>
+        )}
+        {error && <p className="theme-import-error">{error}</p>}
+        {!loaded && <p className="slash-copy">Loading this thread’s goal…</p>}
+      </div>
+    </div>
+  )
+}
+
+function parseGoalDraft(args: string): { objective: string; budget: string } {
+  const match = /^(?:--(?:token-)?budget(?:=|\s+))(\d+)\s*([\s\S]*)/.exec(args.trim())
+  if (match) return { budget: match[1], objective: match[2].trim() }
+  return { objective: args.trim(), budget: '' }
+}
+
+function goalStatusLabel(status: GoalState['status']): string {
+  if (status === 'budget_limited') return 'Budget paused'
+  return status.replace('_', ' ')
+}
+
+function formatGoalUsage(goal: GoalState): string {
+  const used = goal.tokensUsed.toLocaleString()
+  return goal.tokenBudget ? `${used} / ${goal.tokenBudget.toLocaleString()} tokens` : `${used} tokens`
+}
+
+function goalProgress(goal: GoalState): number {
+  if (!goal.tokenBudget || goal.tokenBudget <= 0) return goal.active ? 12 : 0
+  return Math.max(4, Math.min(100, Math.round((goal.tokensUsed / goal.tokenBudget) * 100)))
 }
 
 function ScopedModelsPane({ models, onSave, onClose }: { models: ModelOption[]; onSave: (models: ModelOption[]) => void; onClose: () => void }): JSX.Element {

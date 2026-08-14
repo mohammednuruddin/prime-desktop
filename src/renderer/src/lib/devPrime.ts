@@ -10,6 +10,16 @@ const devSettings = {
   autoRetry: true,
   model: null,
   rlmMaxDepth: 1,
+  transport: 'auto' as const,
+  autonomous: {
+    enabled: false,
+    gates: [],
+    gateRetries: 2,
+    maxContinuations: 8,
+    maxTurns: 30,
+    maxTokens: 100000,
+    maxSeconds: 3600
+  },
   themeMode: 'system' as const,
   codeThemeId: 'codex',
   lightTheme: PRIME_LIGHT_THEME,
@@ -86,6 +96,7 @@ export function installDevPrime(): void {
     ],
     skillsInstall: async () => ({ ok: true }),
     fleetSchedules: async () => ({ [agentId]: [{ id: 'daily-check', cron: '0 9 * * 1-5', prompt: 'Check CI and summarize failures', active: true }] }),
+    fleetTree: async () => [],
     fleetHeartbeat: async () => null,
     gitList: async () => [{ id: 'a13fd22', createdAt: Date.now() - 240_000, label: 'Before inspector redesign', agentId, dirtyFiles: ['src/renderer/src/App.tsx', 'src/renderer/src/styles.css'] }],
     gitDiffFiles: async () => [{ path: 'src/renderer/src/styles.css', status: 'modified', diff: '@@ -581,4 +581,8 @@\n-.side-panel { width: 320px; }\n+.side-panel.closed { width: 0; }\n+.side-panel.open { min-width: 360px; }' }],
@@ -107,6 +118,19 @@ export function installDevPrime(): void {
     dashboardModels: async () => ['openai-codex/gpt-5.6-sol'],
     autonomyGet: async () => ({ config: { enabled: false, gates: ['npm run typecheck'], gateRetries: 2, maxContinuations: 4, maxTurns: 20, maxTokens: 120000, maxSeconds: 3600 }, progress: {} }),
     autonomySet: async () => null,
+    agentHarness: async (_agentId: string, action: string) => {
+      if (action === 'queue') return { steering: [], followUp: [], mutationSupported: true }
+      if (action === 'resources') return { skills: [], prompts: [], extensions: [], themes: [], diagnostics: { skills: [], prompts: [], extensions: [], themes: [] } }
+      if (action === 'package') return { ok: true, output: 'No packages installed.' }
+      if (action === 'mcp_get' || action === 'mcp_set') return { servers: {} }
+      if (action === 'trace_list') return { files: [] }
+      if (action === 'traces') return { enabled: false }
+      if (action === 'model_catalog') return { models: [], configuredProviders: [] }
+      if (action === 'refinement_history') return { history: [] }
+      if (action === 'heartbeats') return { heartbeats: [] }
+      if (action === 'get_tree_full') return { tree: [], leafId: null }
+      return {}
+    },
     tabSelect: async () => null,
     tabRemove: async () => ({ tabs: [], activeTabId: null }),
     onEvent: noopSubscription,

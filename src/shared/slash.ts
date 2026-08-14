@@ -92,6 +92,7 @@ export type SlashOverlayId =
   | 'depth'
   | 'heartbeat'
   | 'scoped-models'
+  | 'goal'
 
 export type SlashDispatch =
   | { action: 'prompt'; message: string; toast?: string }
@@ -130,6 +131,10 @@ function parseRefine(args: string): Extract<SlashDispatch, { action: 'refine' }>
   const rollback = /^rollback\s+(\S+)/.exec(rest)
   if (rollback) return { action: 'refine', rollbackId: rollback[1], global }
   return { action: 'refine', instructions: rest || undefined, global }
+}
+
+export function slashOpensOnPick(name: string): boolean {
+  return dispatchSlash(`/${name}`)?.action === 'overlay'
 }
 
 export function dispatchSlash(raw: string): SlashDispatch | null {
@@ -196,8 +201,13 @@ export function dispatchSlash(raw: string): SlashDispatch | null {
       return { action: 'compact', instructions: args || undefined }
     case 'refine':
       return parseRefine(args)
-    case 'goal':
-      return { action: 'prompt', message: `/goal${args ? ` ${args}` : ''}` }
+    case 'goal': {
+      const verb = args.split(/\s+/)[0]?.toLowerCase() ?? ''
+      if (verb === 'pause' || verb === 'resume' || verb === 'clear' || verb === 'stop') {
+        return { action: 'prompt', message: `/goal ${verb}` }
+      }
+      return { action: 'overlay', overlay: 'goal', args: verb === 'status' ? '' : args }
+    }
     case 'autonomous':
       return { action: 'prompt', message: `/autonomous${args ? ` ${args}` : ' status'}` }
     case 'rlm-max-depth': {
