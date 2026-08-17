@@ -29,8 +29,9 @@ async function save(rules: PermissionRule[]): Promise<void> {
 }
 
 export function matchPermission(command: string, projectPath: string | null): { decision: 'allow' | 'deny' | 'ask'; rule?: PermissionRule } {
-  for (const rule of (cache ?? [])) {
-    if (rule.scope === 'project' && projectPath && rule.projectPath !== projectPath) continue
+  const rules = (cache ?? []).slice().reverse()
+  for (const rule of rules) {
+    if (rule.scope === 'project' && (!projectPath || rule.projectPath !== projectPath)) continue
     if (rule.pattern === '*' || command.includes(rule.pattern)) {
       return { decision: rule.action === 'deny' ? 'deny' : 'allow', rule }
     }
@@ -51,6 +52,9 @@ export async function addRule(rule: PermissionRule): Promise<PermissionRule[]> {
 
 export async function removeRule(indexFromEnd: number): Promise<PermissionRule[]> {
   const rules = await load()
+  if (!Number.isInteger(indexFromEnd) || indexFromEnd < 0 || indexFromEnd >= rules.length) {
+    throw new Error('Permission rule index is out of range')
+  }
   rules.splice(rules.length - 1 - indexFromEnd, 1)
   await save(rules)
   return rules.slice().reverse()

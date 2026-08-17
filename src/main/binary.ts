@@ -1,16 +1,18 @@
 import { execFile } from 'child_process'
-import { mkdir, writeFile, chmod } from 'fs/promises'
+import { mkdir, writeFile, chmod, unlink } from 'fs/promises'
 import { existsSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { promisify } from 'util'
 import https from 'https'
 import { EventEmitter } from 'events'
+import { createHash } from 'crypto'
 
 const execFileAsync = promisify(execFile)
 
 const INSTALL_URL = 'https://app.primeintellect.ai/prime-agent/install.sh'
 const BIN_DIR = join(homedir(), 'Library', 'Application Support', 'PrimeDesktop', 'bin')
+const MAX_INSTALLER_BYTES = 2 * 1024 * 1024
 
 export class BinaryManager extends EventEmitter {
   private state: {
@@ -95,12 +97,20 @@ export class BinaryManager extends EventEmitter {
         this.state.progress = pct * 0.5
         this.emit('change', this.stateSnapshot)
       })
+      if (!script.startsWith('#!') || !/\b(sh|bash)\b/.test(script.slice(0, 120))) {
+        throw new Error('Installer response is not a shell script')
+      }
+      const expectedHash = process.env.PRIME_AGENT_INSTALL_SHA256?.trim().toLowerCase()
+      if (expectedHash && createHash('sha256').update(script).digest('hex') !== expectedHash) {
+        throw new Error('Installer checksum does not match PRIME_AGENT_INSTALL_SHA256')
+      }
       const scriptPath = join(BIN_DIR, 'install.sh')
       await writeFile(scriptPath, script)
       await chmod(scriptPath, 0o755)
       this.state.progress = 0.6
       this.emit('change', this.stateSnapshot)
       await execFileAsync('sh', [scriptPath], { env: { ...process.env, PATH: `${BIN_DIR}:${process.env.PATH ?? ''}` } })
+      await unlink(scriptPath).catch(() => {})
       this.state.progress = 1
       const local = await this.findLocalInstall()
       if (local) {
@@ -119,11 +129,28 @@ export class BinaryManager extends EventEmitter {
     this.emit('change', this.stateSnapshot)
   }
 
-  private download(url: string, onProgress: (pct: number) => void): Promise<string> {
+  private download(url: string, onProgress: (pct: number) => void, redirects = 0): Promise<string> {
     return new Promise((resolve, reject) => {
+      if (redirects > 3) {
+        reject(new Error('Installer redirected too many times'))
+        return
+      }
       const req = https.get(url, { headers: { 'User-Agent': 'prime-desktop' } }, (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          this.download(res.headers.location, onProgress).then(resolve, reject)
+          let next: URL
+          try {
+            next = new URL(res.headers.location, url)
+          } catch {
+            reject(new Error('Installer redirect URL is invalid'))
+            res.resume()
+            return
+          }
+          if (next.protocol !== 'https:' || next.hostname !== 'app.primeintellect.ai') {
+            reject(new Error('Installer redirect leaves the trusted Prime Intellect host'))
+            res.resume()
+            return
+          }
+          this.download(next.toString(), onProgress, redirects + 1).then(resolve, reject)
           res.resume()
           return
         }
@@ -134,8 +161,17 @@ export class BinaryManager extends EventEmitter {
         }
         const chunks: Buffer[] = []
         const total = Number(res.headers['content-length'] ?? 0)
+        if (total > MAX_INSTALLER_BYTES) {
+          reject(new Error('Installer is larger than the allowed limit'))
+          res.resume()
+          return
+        }
         let received = 0
         res.on('data', (c: Buffer) => {
+          if (received + c.length > MAX_INSTALLER_BYTES) {
+            req.destroy(new Error('Installer is larger than the allowed limit'))
+            return
+          }
           chunks.push(c)
           received += c.length
           if (total > 0) onProgress(received / total)

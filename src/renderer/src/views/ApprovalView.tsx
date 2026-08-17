@@ -3,9 +3,10 @@ import type { Checkpoint, FileDiff, PermissionRule } from '@shared/types'
 
 interface Props {
   activeAgentId: string | null
+  projectPath: string | null
 }
 
-export default function ApprovalView({ activeAgentId }: Props): JSX.Element {
+export default function ApprovalView({ activeAgentId, projectPath }: Props): JSX.Element {
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([])
   const [diffs, setDiffs] = useState<FileDiff[]>([])
   const [perms, setPerms] = useState<PermissionRule[]>([])
@@ -133,7 +134,7 @@ export default function ApprovalView({ activeAgentId }: Props): JSX.Element {
               if (!pattern) return
               const action = (document.getElementById('perm-action') as HTMLSelectElement).value as 'allow' | 'deny'
               const scope = (document.getElementById('perm-scope') as HTMLSelectElement).value as 'global' | 'project'
-              void window.prime.permissionsSet(pattern, action, scope, scope === 'project' ? activeAgentId : undefined).then(() =>
+              void window.prime.permissionsSet(pattern, action, scope, scope === 'project' ? projectPath ?? undefined : undefined).then(() =>
                 void window.prime.permissionsList().then(setPerms)
               )
               ;(document.getElementById('perm-pattern') as HTMLInputElement).value = ''

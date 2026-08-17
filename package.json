@@ -5,13 +5,19 @@
   "main": "out/main/index.js",
   "private": true,
   "type": "module",
+  "overrides": {
+    "nanoid": "3.3.18"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "postinstall": "node scripts/fix-node-pty.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "package": "npm run build && electron-builder --mac"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check:release": "node scripts/check-release.mjs",
+    "package": "npm run check:release && npm run build && electron-builder --mac"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
@@ -22,7 +28,8 @@
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "typescript": "^7.0.2",
-    "vite": "^7.3.6"
+    "vite": "^7.3.6",
+    "vitest": "^4.1.10"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",

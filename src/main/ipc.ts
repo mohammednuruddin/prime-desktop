@@ -1,10 +1,10 @@
-import { BrowserWindow, dialog, ipcMain, Notification, shell, app, nativeTheme } from 'electron'
+import { BrowserWindow, dialog, ipcMain as electronIpcMain, Notification, shell, app, nativeTheme, type IpcMainInvokeEvent } from 'electron'
 import { AgentManager } from './agentManager'
 import { BinaryManager } from './binary'
 import { getState, setSessionPinned, setSettings, setTabs } from './store'
 import { listRules, addRule, removeRule } from './permissions'
 import { IPC, type AgentCommand, type ProjectTab, type AutonomousConfig } from '@shared/types'
-import { basename, join } from 'path'
+import { basename, join, resolve as resolvePath } from 'path'
 import { randomUUID } from 'crypto'
 import { TerminalManager } from './terminalManager'
 import { resolveThemeMode } from '@shared/themes'
@@ -18,9 +18,29 @@ import {
   setAuthKey,
   writePrimeRlmMaxDepth
 } from './primeFiles'
+import {
+  assertTrustedRenderer,
+  requireExistingDirectory,
+  requireExistingFile,
+  requireFiniteNumber,
+  requireNonEmptyString,
+  requireSafeExternalUrl,
+  validateAgentCommand
+} from './ipcSecurity'
 
 export function registerIpc(win: () => BrowserWindow | null, manager: AgentManager, binary: BinaryManager): void {
   const terminals = new TerminalManager()
+  const ipcMain = {
+    handle<Args extends unknown[], Result>(
+      channel: string,
+      listener: (event: IpcMainInvokeEvent, ...args: Args) => Result | Promise<Result>
+    ): void {
+      electronIpcMain.handle(channel, (event, ...args) => {
+        assertTrustedRenderer(event, win)
+        return listener(event, ...args as Args)
+      })
+    }
+  }
   const send = (channel: string, payload: unknown) => {
     const w = win()
     if (w && !w.isDestroyed()) w.webContents.send(channel, payload)
@@ -72,7 +92,8 @@ export function registerIpc(win: () => BrowserWindow | null, manager: AgentManag
     return { tabs: s.tabs, activeTabId: s.activeTabId }
   })
 
-  ipcMain.handle(IPC.tabAdd, async (_e, path: string) => {
+  ipcMain.handle(IPC.tabAdd, async (_e, rawPath: string) => {
+    const path = requireExistingDirectory(rawPath, 'project path')
     const s = await getState()
     const tab: ProjectTab = { id: randomUUID(), path, name: basename(path) }
     const tabs = [...s.tabs.filter((t) => t.path !== path), tab]
@@ -94,6 +115,7 @@ export function registerIpc(win: () => BrowserWindow | null, manager: AgentManag
 
   ipcMain.handle(IPC.tabSelect, async (_e, tabId: string) => {
     const s = await getState()
+    if (!s.tabs.some((tab) => tab.id === tabId)) throw new Error('Unknown tab')
     await setTabs(s.tabs, tabId)
     return { activeTabId: tabId }
   })
@@ -109,6 +131,7 @@ export function registerIpc(win: () => BrowserWindow | null, manager: AgentManag
 
   ipcMain.handle(IPC.agentCommand, async (_e, agentId: string, cmd: AgentCommand) => {
     const s = await getState()
+    cmd = validateAgentCommand(cmd)
     if (cmd.type === 'set_model' && (cmd as { modelId?: string }).modelId) {
       const id = (cmd as { modelId: string }).modelId
       const provider = (cmd as { provider?: string }).provider
@@ -120,11 +143,23 @@ export function registerIpc(win: () => BrowserWindow | null, manager: AgentManag
   ipcMain.handle(IPC.agentMessages, (_e, agentId: string) => manager.getMessages(agentId))
   ipcMain.handle(IPC.agentStats, (_e, agentId: string) => manager.getStats(agentId))
   ipcMain.handle(IPC.agentSessions, (_e, agentId?: string) => manager.getSessions(agentId))
-  ipcMain.handle(IPC.agentResume, (_e, agentId: string, sessionPath: string) => manager.resumeSession(agentId, sessionPath))
+  ipcMain.handle(IPC.agentResume, async (_e, agentId: string, sessionPath: string) => {
+    const sessions = await manager.getSessions(agentId)
+    const target = requireExistingFile(sessionPath, 'session path')
+    if (!sessions.some((session) => resolvePath(session.sessionFile) === target)) {
+      throw new Error('Session does not belong to this project')
+    }
+    return manager.resumeSession(agentId, target)
+  })
   ipcMain.handle(IPC.agentSessionDelete, async (_e, agentId: string, sessionPath: string) => {
-    const sessions = await manager.deleteSession(agentId, sessionPath)
-    await setSessionPinned(sessionPath, false)
-    return sessions
+    const sessions = await manager.getSessions(agentId)
+    const target = requireExistingFile(sessionPath, 'session path')
+    if (!sessions.some((session) => resolvePath(session.sessionFile) === target)) {
+      throw new Error('Session does not belong to this project')
+    }
+    const remaining = await manager.deleteSession(agentId, target)
+    await setSessionPinned(target, false)
+    return remaining
   })
   ipcMain.handle(IPC.sessionPinsGet, async () => (await getState()).pinnedSessionFiles)
   ipcMain.handle(IPC.sessionPinSet, (_e, sessionPath: string, pinned: boolean) =>
@@ -182,9 +217,16 @@ export function registerIpc(win: () => BrowserWindow | null, manager: AgentManag
 
   ipcMain.handle(IPC.permissionsList, () => listRules())
   ipcMain.handle(IPC.permissionsSet, (_e, pattern: string, action: 'allow' | 'deny', scope: 'global' | 'project', projectPath?: string) =>
-    addRule({ pattern, action, scope, projectPath })
+    addRule({
+      pattern: requireNonEmptyString(pattern, 'pattern', 4_096),
+      action: action === 'deny' ? 'deny' : 'allow',
+      scope: scope === 'project' ? 'project' : 'global',
+      projectPath: scope === 'project' && projectPath ? requireExistingDirectory(projectPath, 'project path') : undefined
+    })
   )
-  ipcMain.handle(IPC.permissionsRemove, (_e, index: number) => removeRule(index))
+  ipcMain.handle(IPC.permissionsRemove, (_e, index: number) =>
+    removeRule(requireFiniteNumber(index, 'rule index', 0, 100_000))
+  )
 
   ipcMain.handle(IPC.dashboardSpend, () => manager.spend())
   ipcMain.handle(IPC.dashboardModels, async () => {
@@ -245,13 +287,15 @@ export function registerIpc(win: () => BrowserWindow | null, manager: AgentManag
     return settings
   })
 
-  ipcMain.handle(IPC.revealInFinder, (_e, path: string) => shell.showItemInFolder(path))
-  ipcMain.handle(IPC.openExternal, (_e, url: string) => shell.openExternal(url))
+  ipcMain.handle(IPC.revealInFinder, (_e, path: string) => shell.showItemInFolder(requireExistingFile(path, 'path')))
+  ipcMain.handle(IPC.openExternal, (_e, url: string) => shell.openExternal(requireSafeExternalUrl(url)))
   ipcMain.handle(IPC.quit, () => app.quit())
 
   ipcMain.handle(IPC.authList, () => listAuthProviders())
-  ipcMain.handle(IPC.authSet, (_e, provider: string, key: string) => setAuthKey(provider, key))
-  ipcMain.handle(IPC.authRemove, (_e, provider: string) => removeAuth(provider))
+  ipcMain.handle(IPC.authSet, (_e, provider: string, key: string) =>
+    setAuthKey(requireNonEmptyString(provider, 'provider', 128), requireNonEmptyString(key, 'API key', 4_096))
+  )
+  ipcMain.handle(IPC.authRemove, (_e, provider: string) => removeAuth(requireNonEmptyString(provider, 'provider', 128)))
   ipcMain.handle(IPC.authOpenTui, () => {
     openPrimeAgentLogin()
     return true

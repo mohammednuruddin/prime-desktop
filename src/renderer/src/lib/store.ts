@@ -230,7 +230,7 @@ export function patchToolExecs(
   const result = payload.result as { content?: unknown } | undefined
   const output = extractText((event === 'end' ? result?.content : partial?.content) ?? payload.content)
   if (event === 'update') {
-    if (alreadyDone) return output ? { ...prev, [id]: { ...cur, output: output || cur.output } } : prev
+    if (alreadyDone) return prev
     return {
       ...prev,
       [id]: {

@@ -6,6 +6,7 @@ import { registerIpc } from './ipc'
 import { getState } from './store'
 import type { AppSettings } from '@shared/types'
 import { resolveThemeMode } from '@shared/themes'
+import { logError } from './logger'
 
 let mainWindow: BrowserWindow | null = null
 let manager: AgentManager | null = null
@@ -128,8 +129,8 @@ app.whenReady().then(async () => {
   for (const tab of state.tabs) {
     try {
       await manager.openTab(tab, state.settings)
-    } catch {
-      /* skip broken tabs */
+    } catch (error) {
+      logError(`Failed to restore project tab ${tab.path}`, error)
     }
   }
 
@@ -139,6 +140,9 @@ app.whenReady().then(async () => {
     }
   })
 })
+
+process.on('uncaughtException', (error) => logError('Uncaught main-process exception', error))
+process.on('unhandledRejection', (reason) => logError('Unhandled main-process rejection', reason))
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()

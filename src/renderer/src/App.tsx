@@ -490,7 +490,7 @@ export default function App(): JSX.Element {
                   />
                 )}
                 {state.view === 'fleet' && <FleetView state={state} />}
-                {state.view === 'approval' && <ApprovalView activeAgentId={activeAgentId} />}
+                {state.view === 'approval' && <ApprovalView activeAgentId={activeAgentId} projectPath={activeTab?.path ?? null} />}
                 {state.view === 'dashboard' && <DashboardView />}
                 {state.view === 'skills' && <SkillsView activeAgentId={activeAgentId} />}
                 {state.view === 'diagnostics' && <DiagnosticsView activeAgentId={activeAgentId} />}
