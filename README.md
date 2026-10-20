@@ -55,7 +55,7 @@ The packaged application requires the same Prime Agent runtime and macOS permiss
 
 - The product name and ids come from `src/shared/product.json`; a private build replaces that one file and passes its own Tauri settings with `TAURI_CONFIG`. Nothing else names a product.
 - Signing is left to the builder: `certificateThumbprint` is unset, and `scripts/tauri-agent.mjs --sign "<command>"` signs the bundled agent.
-- Checks that run today: `cargo +stable clippy --workspace --all-targets -- -D warnings` and `cargo +stable test --workspace` in `src-tauri` and in `sandbox`. The renderer bridge (`window.prime` over Tauri) is not here yet: it lands with the UI port, because this repo's preload is an older contract than the one the host answers.
+- Checks that run today: `cargo +stable clippy --workspace --all-targets -- -D warnings` and `cargo +stable test --workspace` in `src-tauri` and in `sandbox`. The renderer bridge (`window.prime` over Tauri) is not here yet, so the host does not run this repo's renderer until it lands.
 
 ## License
 
