@@ -1,0 +1,14 @@
+# The sandbox is its own Cargo workspace, independent of the desktop host. Electron calls the
+# `desktop-sandbox` helper today and Tauri will call it the same way, so neither host owns it.
+[workspace]
+resolver = "2"
+members = ["policy", "probes", "helper"]
+
+[workspace.package]
+edition = "2024"
+license = "UNLICENSED" # ponytail: placeholder until the licence decision in docs/memory/public-base-ownership-and-license.md
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
