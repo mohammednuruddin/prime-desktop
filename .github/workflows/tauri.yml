@@ -13,6 +13,9 @@ on:
     paths: ['src/**', 'src-tauri/**', 'sandbox/**', 'scripts/**', 'tests/**', 'package*.json', '.github/workflows/tauri.yml']
   workflow_call:
 
+permissions:
+  contents: read
+
 concurrency:
   group: tauri-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
