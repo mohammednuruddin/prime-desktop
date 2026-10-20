@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "externalBin": [
+      "binaries/desktop-sandbox",
+      "binaries/desktop-sandbox-probes",
+      "binaries/probe-agent",
+      "binaries/uv"
+    ],
+    "resources": {
+      "binaries/agent/": "agent/"
+    }
+  }
+}
