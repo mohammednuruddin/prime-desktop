@@ -1,0 +1,4 @@
+# Smart App Control judges unsigned build programs by reputation, and a toolchain update has made cargo.exe
+# blocked on other machines (rust-lang/rust#160163). Stay on the version that builds here until a spike run says otherwise.
+[toolchain]
+channel = "1.96.0"
