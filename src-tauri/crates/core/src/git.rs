@@ -826,12 +826,23 @@ fn stays_inside(path: &str) -> bool {
             .all(|part| matches!(part, Component::Normal(_)))
 }
 
+/// Whether a folder on the way from `root` to `path` is a link. The working tree can be changed by the code the agent runs,
+/// so a tracked folder may now be a link out of the project, and deleting through it would delete outside it.
+fn through_link(root: &Path, path: &str) -> bool {
+    let mut at = root.to_path_buf();
+    let parts: Vec<_> = Path::new(path).components().collect();
+    parts[..parts.len().saturating_sub(1)].iter().any(|part| {
+        at.push(part);
+        std::fs::symlink_metadata(&at).is_ok_and(|meta| meta.file_type().is_symlink())
+    })
+}
+
 /// Deletes the files in `current` that `snapshot` does not have, then the folders they leave empty.
 fn remove_files_not_in(root: &Path, current: &[String], snapshot: &HashSet<String>) {
     let mut seen = HashSet::new();
     for path in current {
         // Nested repositories show up as "dir/"; never remove those. ls-files can list a path once per merge stage.
-        if snapshot.contains(path) || !stays_inside(path) || !seen.insert(path) {
+        if snapshot.contains(path) || !stays_inside(path) || through_link(root, path) || !seen.insert(path) {
             continue;
         }
         let file = root.join(path);
@@ -2155,6 +2166,20 @@ mod tests {
             git(root, &["log", "-1", "--format=%an <%ae>", &sha]).trim(),
             format!("{} <{FALLBACK_EMAIL}>", crate::product::product().name)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restoring_never_deletes_through_a_folder_that_became_a_link() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep.txt"), "mine").unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), project.path().join("dir")).unwrap();
+        std::fs::write(project.path().join("plain.txt"), "x").unwrap();
+        let current = ["dir/keep.txt".to_string(), "plain.txt".to_string()];
+        remove_files_not_in(project.path(), &current, &HashSet::new());
+        assert!(outside.path().join("keep.txt").exists());
+        assert!(!project.path().join("plain.txt").exists());
     }
 
     #[tokio::test]

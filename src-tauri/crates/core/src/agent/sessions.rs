@@ -381,7 +381,7 @@ pub fn session_file_for(session_id: &str) -> Option<PathBuf> {
 
 fn session_file_in(dir: &Path, session_id: &str) -> Option<PathBuf> {
     // The id comes from the daemon, but it names a file here, so it must not be able to leave the folder.
-    if session_id.is_empty() || session_id.contains(['/', '\\', '\0']) {
+    if session_id.is_empty() || session_id.contains(['/', '\\', '\0', ':']) {
         return None;
     }
     let named = dir.join(format!("{session_id}.jsonl"));
@@ -825,7 +825,7 @@ mod tests {
             None,
             "a deleted file is not returned"
         );
-        for hostile in ["", "../x", "a/b", r"a\b", "x\0y"] {
+        for hostile in ["", "../x", "a/b", r"a\b", "x\0y", "C:x", "C:..\\x"] {
             assert_eq!(session_file_in(dir.path(), hostile), None, "{hostile:?}");
         }
     }
