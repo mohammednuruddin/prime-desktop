@@ -1,4 +1,6 @@
 # Smart App Control judges unsigned build programs by reputation, and a toolchain update has made cargo.exe
-# blocked on other machines (rust-lang/rust#160163). Stay on the version that builds here until a spike run says otherwise.
+# blocked on some machines (rust-lang/rust#160163). Stay on this version until a spike run says otherwise.
+# The components are listed because a pinned toolchain installs without them, and CI runs both.
 [toolchain]
 channel = "1.96.0"
+components = ["rustfmt", "clippy"]

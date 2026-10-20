@@ -1,6 +1,6 @@
 [package]
 name = "desktop-core"
-version = "0.1.1"
+version = "0.1.0"
 description = "Prime Desktop application logic: state, git, files, terminal, the Prime Agent link and the sandbox wiring. No Tauri here, so it is tested headless."
 edition = "2024"
 publish = false
