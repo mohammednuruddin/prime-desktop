@@ -49,6 +49,14 @@ The packaged application requires the same Prime Agent runtime and macOS permiss
 3. Set `PRIME_AGENT_INSTALL_SHA256` when distributing the bundled installer flow.
 4. Run `npm run typecheck`, `npm test`, and `npm run check:release`.
 
+## Tauri host (in progress)
+
+`src-tauri/` is a Tauri v2 host on a Rust core (`src-tauri/crates/core`, no Tauri in it) that drives the Rust Prime Agent through its daemon protocol, and `sandbox/` is the Rust sandbox for the agent's code (policy, helper, kernel wrapper and probes). The Electron app is unchanged and still what ships.
+
+- The product name and ids come from `src/shared/product.json`; a private build replaces that one file and passes its own Tauri settings with `TAURI_CONFIG`. Nothing else names a product.
+- Signing is left to the builder: `certificateThumbprint` is unset, and `scripts/tauri-agent.mjs --sign "<command>"` signs the bundled agent.
+- Checks that run today: `cargo +stable clippy --workspace --all-targets -- -D warnings` and `cargo +stable test --workspace` in `src-tauri` and in `sandbox`. The renderer bridge (`window.prime` over Tauri) is not here yet: it lands with the UI port, because this repo's preload is an older contract than the one the host answers.
+
 ## License
 
 No license has been selected yet. Add one before distributing this project for reuse.
