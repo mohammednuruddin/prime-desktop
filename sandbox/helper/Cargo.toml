@@ -1,0 +1,18 @@
+[package]
+name = "desktop-sandbox"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The sandbox helper: argv, cwd and a policy in, an enforced child out. Fails closed when the host cannot hold the policy."
+
+[dependencies]
+desktop-sandbox-policy = { path = "../policy" }
+serde.workspace = true
+serde_json.workspace = true
+# Microsoft Execution Containers. Pinned exactly: the SDK is new (GA 2026-10-07) and Codex itself pins a git revision.
+mxc-sdk = "=1.0.0"
+
+[target.'cfg(windows)'.dependencies]
+# Job objects: a limit on how many processes the child tree may hold, and kill-on-close for all of them.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Registry"] }

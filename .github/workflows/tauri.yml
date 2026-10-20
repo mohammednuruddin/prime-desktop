@@ -1,0 +1,81 @@
+name: Tauri
+
+# The Tauri app on a real machine of each target system: the renderer's checks, the Rust suite, and an installer built
+# unsigned (signing is done on the maintainer's Windows PC and in the release workflow). This is also the first place
+# the macOS and Linux builds run at all. Nothing here has run yet, so read the first results as a first run.
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'src-tauri/**', 'sandbox/**', 'scripts/**', 'tests/**', 'package*.json', '.github/workflows/tauri.yml']
+  pull_request:
+    paths: ['src/**', 'src-tauri/**', 'sandbox/**', 'scripts/**', 'tests/**', 'package*.json', '.github/workflows/tauri.yml']
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            bundles: deb
+          - os: macos-15
+            bundles: dmg
+          - os: windows-2025
+            bundles: nsis
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf bubblewrap
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Renderer build
+        run: npm run build
+
+      - name: Rust suite
+        working-directory: src-tauri
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+
+      - name: Stage the renderer and the sidecars
+        run: |
+          node scripts/tauri-stage.mjs
+          cargo build --release --manifest-path sandbox/Cargo.toml -p desktop-sandbox -p desktop-sandbox-probes
+          node scripts/tauri-sidecars.mjs
+
+      - name: Unsigned installer
+        run: |
+          cargo install tauri-cli --version '^2' --locked
+          # The local signing identity is Windows-only and lives on the maintainer's PC.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p));delete c.bundle.windows.certificateThumbprint;fs.writeFileSync(p,JSON.stringify(c,null,2))"
+          fi
+          cargo tauri build --bundles ${{ matrix.bundles }} --config src-tauri/tauri.sidecars.conf.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prime-desktop-${{ matrix.os }}
+          path: |
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/**/*.deb
+          if-no-files-found: warn

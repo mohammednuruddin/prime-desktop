@@ -1,0 +1,20 @@
+[package]
+name = "desktop-sandbox-probes"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Behavioural allow/deny probes for any Desktop sandbox backend. 'Enforced' is only ever claimed after these pass on the host."
+
+[dependencies]
+desktop-sandbox-policy = { path = "../policy" }
+serde.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "probe-agent"
+path = "src/bin/probe_agent.rs"
+
+[[bin]]
+name = "desktop-sandbox-probes"
+path = "src/main.rs"
