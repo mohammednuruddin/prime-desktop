@@ -254,6 +254,7 @@ async fn version_of(binary: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
