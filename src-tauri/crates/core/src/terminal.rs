@@ -1071,7 +1071,9 @@ mod tests {
         assert!(!alive(snapshot.pid));
     }
 
-    #[cfg(unix)]
+    // Linux only: a full macOS terminal drops further input instead of blocking the writer, so there is no stuck write to
+    // close on.
+    #[cfg(target_os = "linux")]
     #[test]
     fn closing_does_not_wait_for_a_write_the_shell_is_not_reading() {
         let rig = Arc::new(Rig::new());
