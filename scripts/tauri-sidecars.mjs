@@ -10,6 +10,9 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// Git Bash's GNU tar reads `C:\\...` as a host name; the system's own bsdtar takes Windows paths and reads zip files too.
+const tar = process.platform === 'win32' ? join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe') : 'tar'
+
 const UV_VERSION = '0.11.12'
 const UV = {
   'x86_64-pc-windows-msvc': ['zip', 'e46956a6b088a0382101c797eef945c1b03826e629e968d434cf838d42d85b6b'],
@@ -52,7 +55,7 @@ try {
   if (actual !== sha256) throw new Error(`uv ${UV_VERSION} for ${triple} does not match its pinned checksum (got ${actual}).`)
   // bsdtar (Windows, macOS) reads zip files too; GNU tar does not, so Linux uses unzip for them.
   if (kind === 'zip' && process.platform === 'linux') execFileSync('unzip', ['-q', archive, '-d', scratch])
-  else execFileSync('tar', ['-xf', archive, '-C', scratch])
+  else execFileSync(tar, ['-xf', archive, '-C', scratch])
   const found = [scratch, ...readdirSync(scratch, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => join(scratch, d.name))]
     .map((dir) => join(dir, `uv${exe}`))
     .find(existsSync)
