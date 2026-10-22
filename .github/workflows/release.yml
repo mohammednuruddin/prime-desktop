@@ -48,6 +48,8 @@ jobs:
         run: |
           prerelease=()
           case "$GITHUB_REF_NAME" in *-*) prerelease+=(--prerelease) ;; esac
+          # The installers' names contain spaces, so collect them NUL-separated.
+          mapfile -d '' installers < <(find dist -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.deb' \) -print0)
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --title "Prime Desktop ${GITHUB_REF_NAME#v}" --notes-file dist/release-notes/release-notes.md \
-            --verify-tag "${prerelease[@]}" $(find dist -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.deb' \))
+            --verify-tag "${prerelease[@]}" "${installers[@]}"
