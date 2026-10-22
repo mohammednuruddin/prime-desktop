@@ -43,7 +43,13 @@ for (const file of ['src-tauri/Cargo.toml', 'src-tauri/crates/core/Cargo.toml'])
 edit('src-tauri/Cargo.lock', (text) =>
   text.replace(/(name = "(?:desktop-core|prime-desktop-host)"\nversion = )"[^"]+"/g, `$1"${next}"`)
 )
-run('npm', ['install', '--package-lock-only', '--ignore-scripts', '--legacy-peer-deps'])
+// Only the two version fields change; `npm install --package-lock-only` would also prune optional dependencies
+// that are absent from the machine cutting the release.
+edit('package-lock.json', (text) => {
+  const lock = JSON.parse(text)
+  lock.version = lock.packages[''].version = next
+  return `${JSON.stringify(lock, null, 2)}\n`
+})
 run('git', ['add', '-A'])
 run('git', ['commit', '-m', `Release ${next}`])
 run('git', ['tag', '-a', `v${next}`, '-m', `Prime Desktop ${next}`])
