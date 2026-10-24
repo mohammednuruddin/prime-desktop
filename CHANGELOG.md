@@ -16,3 +16,4 @@ All notable changes to Prime Desktop. The format follows [Keep a Changelog](http
 ### Fixed
 
 - The pinned Rust toolchain now installs rustfmt and clippy, which stopped every CI job at the first step.
+- The terminal keeps up with a command that prints a lot. When the page was slow to take output, the terminal passed it on one read at a time, and on macOS that is often one line, so it fell steadily behind and its queue kept growing. It now passes on everything already waiting, in batches.

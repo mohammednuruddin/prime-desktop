@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -364,6 +364,26 @@ fn take_text(bytes: &mut Vec<u8>) -> String {
     text
 }
 
+/// Waits up to `wait` for the reader, then moves everything it has queued into `pending`, up to a full batch. Taking one
+/// read per turn instead would let a sink slower than [`FLUSH_DELAY`] get one read per event, and on macOS a read can be
+/// a single line: the backlog then grows without bound while the page falls ever further behind. Returns whether the
+/// wait ended with nothing to read, and whether the terminal has ended.
+fn gather(rx: &Receiver<Msg>, wait: Duration, pending: &mut String) -> (bool, bool) {
+    let mut message = rx.recv_timeout(wait).ok();
+    let mut idle = message.is_none();
+    let mut eof = false;
+    while let Some(next) = message.take() {
+        match next {
+            Msg::Text(text) => pending.push_str(&text),
+            Msg::Eof => (idle, eof) = (true, true),
+        }
+        if !eof && pending.len() < FLUSH_BYTES {
+            message = rx.try_recv().ok();
+        }
+    }
+    (idle, eof)
+}
+
 /// Gathers a session's output into events and reports its end. Runs until the shell is gone and its output is read.
 fn pump(rx: Receiver<Msg>, _keep_open: Sender<Msg>, inner: Arc<Inner>, session: Arc<Session>, agent_id: String) {
     // `_keep_open` stops a finished reader from disconnecting the channel, which would turn the waits below into a spin.
@@ -377,17 +397,8 @@ fn pump(rx: Receiver<Msg>, _keep_open: Sender<Msg>, inner: Arc<Inner>, session: 
         if !pending.is_empty() {
             wake = wake.min(last_flush + FLUSH_DELAY);
         }
-        let idle = match rx.recv_timeout(wake.saturating_duration_since(now)) {
-            Ok(Msg::Text(text)) => {
-                pending.push_str(&text);
-                false
-            }
-            Ok(Msg::Eof) => {
-                eof = true;
-                true
-            }
-            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => true,
-        };
+        let (idle, ended) = gather(&rx, wake.saturating_duration_since(now), &mut pending);
+        eof |= ended;
 
         let now = Instant::now();
         if idle && exited.is_none() {
@@ -455,6 +466,48 @@ fn end(inner: &Inner, session: &Arc<Session>, agent_id: &str, exit_code: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- the batching, which needs no shell ----
+
+    #[test]
+    fn a_backlog_of_small_reads_is_gathered_into_few_batches() {
+        let (tx, rx) = mpsc::channel();
+        let expected: String = (0..10_000).map(|n| format!("line{n}\r\n")).collect();
+        for n in 0..10_000 {
+            tx.send(Msg::Text(format!("line{n}\r\n"))).unwrap();
+        }
+        let mut got = String::new();
+        let mut batches = 0;
+        loop {
+            let mut pending = String::new();
+            gather(&rx, Duration::from_millis(10), &mut pending);
+            if pending.is_empty() {
+                break;
+            }
+            batches += 1;
+            got.push_str(&pending);
+        }
+        assert_eq!(got, expected, "nothing lost, nothing reordered");
+        assert!(
+            batches <= 3,
+            "{batches} batches for ~100 KB; one read per batch is the bug"
+        );
+    }
+
+    #[test]
+    fn the_end_of_the_terminal_stops_the_batch() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Msg::Text("last words".into())).unwrap();
+        tx.send(Msg::Eof).unwrap();
+        let mut pending = String::new();
+        assert_eq!(gather(&rx, Duration::from_secs(1), &mut pending), (true, true));
+        assert_eq!(pending, "last words");
+        assert_eq!(
+            gather(&rx, Duration::from_millis(10), &mut pending),
+            (true, false),
+            "a quiet wait is idle"
+        );
+    }
 
     // ---- the decoder, which needs no shell ----
 
