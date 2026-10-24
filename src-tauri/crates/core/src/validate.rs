@@ -184,7 +184,7 @@ pub fn settings_patch(patch: &Value) -> Result<()> {
                 }
             }
             "model" if !(value.is_null() || value.is_string()) => bail!("model must be text"),
-            "rlmMaxDepth" if !value.as_u64().is_some_and(|depth| depth <= 10) => {
+            "rlmMaxDepth" if value.as_u64().is_none_or(|depth| depth > 10) => {
                 bail!("rlmMaxDepth must be a whole number from 0 to 10")
             }
             _ => {}

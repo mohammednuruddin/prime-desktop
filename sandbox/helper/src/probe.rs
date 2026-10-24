@@ -145,7 +145,13 @@ mod tests {
         // Installing a package changes the folder's time.
         std::fs::create_dir_all(packages.join("newpkg")).unwrap();
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
-        std::fs::File::open(&packages).unwrap().set_modified(later).unwrap();
+        let mut open = std::fs::OpenOptions::new();
+        // Windows opens a folder only for writing and with backup semantics; elsewhere a read-only handle is enough.
+        #[cfg(windows)]
+        std::os::windows::fs::OpenOptionsExt::custom_flags(open.write(true), 0x0200_0000); // FILE_FLAG_BACKUP_SEMANTICS
+        #[cfg(not(windows))]
+        open.read(true);
+        open.open(&packages).unwrap().set_modified(later).unwrap();
         assert_ne!(
             first,
             key("import edit", &python, &[]),

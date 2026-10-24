@@ -485,7 +485,7 @@ mod tests {
     fn equal_times_order_by_path_and_times_before_the_epoch_sort_last() {
         let dir = tempfile::tempdir().unwrap();
         // Where "A.txt" and "a.txt" are the same file (Windows, default macOS), the case tie-break cannot be tested.
-        let names = if cfg!(windows) {
+        let names = if cfg!(any(windows, target_os = "macos")) {
             ["c.txt", "B.txt", "a.txt", "old.txt"]
         } else {
             ["b.txt", "A.txt", "a.txt", "old.txt"]
@@ -505,7 +505,7 @@ mod tests {
                 .unwrap();
         }
         let listing = list_project_files(dir.path(), FILE_LIMIT, MAX_DEPTH);
-        let expected = if cfg!(windows) {
+        let expected = if cfg!(any(windows, target_os = "macos")) {
             ["a.txt", "B.txt", "c.txt", "old.txt"]
         } else {
             ["A.txt", "a.txt", "b.txt", "old.txt"]

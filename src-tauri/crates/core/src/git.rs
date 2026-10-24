@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
@@ -542,6 +542,10 @@ const SNAPSHOT_MAX_FILES: usize = 5000;
 /// The modification times of the previous walk of each folder.
 static SNAPSHOTS: LazyLock<Mutex<HashMap<PathBuf, HashMap<String, f64>>>> = LazyLock::new(Default::default);
 
+/// Who is taking a snapshot of each folder. Snapshots of one folder take turns: run together they write the same
+/// objects, and on Windows git fails the later writer's rename with "Permission denied".
+static SNAPSHOT_TURNS: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = LazyLock::new(Default::default);
+
 /// Relative path to modification time in milliseconds, for the files the app cares about.
 fn walk_project(root: &Path) -> HashMap<String, f64> {
     let mut out = HashMap::new();
@@ -750,6 +754,13 @@ impl Drop for TempIndex {
 /// it, so a project opened in a subfolder of a larger repository only snapshots that subfolder. HEAD, the branch and the
 /// real index are not touched.
 pub async fn create_checkpoint_snapshot(dir: &Path, message: &str, previous: Option<&str>) -> Result<Option<String>> {
+    let turn = SNAPSHOT_TURNS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(dir.to_path_buf())
+        .or_default()
+        .clone();
+    let _turn = turn.lock().await;
     if !is_git_repo(dir).await {
         return Ok(None);
     }
@@ -2197,8 +2208,12 @@ mod tests {
             .into_iter()
             .map(|result| result.unwrap().unwrap())
             .collect();
-        // Same tree, parent and message: one commit, or two when the clock ticks over between them.
-        assert!((1..=2).contains(&ids.len()), "{ids:?}");
+        // Same tree, parent and message, so the commits differ only in the second they were made in.
+        let trees: HashSet<_> = ids
+            .iter()
+            .map(|id| git(root, &["rev-parse", &format!("{id}^{{tree}}")]).trim().to_string())
+            .collect();
+        assert_eq!(trees.len(), 1, "{ids:?}");
         for id in &ids {
             assert!(checkpoint_exists(root, id).await);
         }

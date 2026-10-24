@@ -11,6 +11,9 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// Git Bash's GNU tar reads `C:\\...` as a host name; the system's own bsdtar takes Windows paths and reads zip files too.
+const tar = process.platform === 'win32' ? join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe') : 'tar'
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
 const option = (name, fallback) => (args.includes(name) ? args[args.indexOf(name) + 1] : fallback)
@@ -41,7 +44,7 @@ try {
   execFileSync('curl', ['-L', '--fail', '--silent', '--show-error', '--retry', '5', '--retry-all-errors', '--connect-timeout', '30', '-o', archive, `https://github.com/${repo}/releases/download/v${version}/${file}`], { stdio: 'inherit' })
   const sha = (path) => createHash('sha256').update(readFileSync(path)).digest('hex')
   if (sha(archive) !== archiveHash) throw new Error(`${file} does not match its pinned checksum.`)
-  execFileSync('tar', ['-xzf', archive, '-C', out])
+  execFileSync(tar, ['-xzf', archive, '-C', out])
   const program = join(out, triple.includes('windows') ? 'prime-agent.exe' : 'prime-agent')
   if (!existsSync(program)) throw new Error('The archive holds no prime-agent program.')
   if (sha(program) !== programHash) throw new Error('The unpacked program does not match its pinned checksum.')

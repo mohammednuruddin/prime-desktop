@@ -254,6 +254,7 @@ async fn version_of(binary: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
@@ -336,8 +337,17 @@ mod tests {
             shipped,
             "before any check, the shipped copy is the one to start"
         );
-        manager.check().await;
-        let state = manager.snapshot();
+        // A script written a moment ago can refuse to run (ETXTBSY) while another test's child process still holds a copy
+        // of its file handle, so give the check a few tries.
+        let mut state = manager.snapshot();
+        for _ in 0..5 {
+            manager.check().await;
+            state = manager.snapshot();
+            if state.version.as_deref() == Some("shipped") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         assert_eq!(state.version.as_deref(), Some("shipped"));
         assert_eq!(state.path.as_deref(), Some(shipped.to_str().unwrap()));
     }
